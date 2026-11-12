@@ -42,6 +42,8 @@ The process costs roughly $20–40 in API usage depending on book length — abo
 ├── about_this_book.md                   # About page included in the book
 ├── metadata.yaml                        # EPUB/PDF build metadata
 ├── cover.jpg                            # Cover image
+├── epub.css                             # EPUB stylesheet (page margins)
+├── pdf.css                              # PDF stylesheet (book-sized type)
 ├── combined.md                          # Full manuscript in one file
 ├── Claude-Code-Definitive-Guide.epub    # Ready to download
 ├── Claude-Code-Definitive-Guide.pdf     # Ready to download
@@ -64,15 +66,15 @@ The process costs roughly $20–40 in API usage depending on book length — abo
     └── 17-appendix-c-troubleshooting.md
 ```
 
-## Rebuild the EPUB
+## Rebuild the EPUB and PDF
 
 If you modify any chapter files:
 
 ```bash
 # Combine chapters
 cat about_this_book.md > combined.md
-for f in chapters/[0-9][1-9]*.md chapters/[1-9][0-9]*.md; do
-  echo -e "\n\n" >> combined.md
+for f in chapters/*.md; do
+  printf '\n\n\n' >> combined.md
   cat "$f" >> combined.md
 done
 
@@ -80,11 +82,15 @@ done
 pandoc metadata.yaml combined.md \
   -o "Claude-Code-Definitive-Guide.epub" \
   --toc --toc-depth=2 --split-level=1 \
-  --epub-cover-image=cover.jpg
+  --epub-cover-image=cover.jpg \
+  --css epub.css
 
-# Generate PDF (requires xelatex or md-to-pdf)
-md-to-pdf combined.md --pdf-options '{"format": "A4", "margin": {"top": "25mm", "bottom": "25mm", "left": "20mm", "right": "20mm"}}'
-mv combined.pdf Claude-Code-Definitive-Guide.pdf
+# Generate PDF (md-to-pdf), then put the cover in front
+md-to-pdf combined.md --stylesheet pdf.css \
+  --pdf-options '{"format": "A4", "margin": {"top": "0.25in", "bottom": "0.25in", "left": "20mm", "right": "20mm"}}'
+img2pdf --pagesize A4 --fit into cover.jpg -o cover.pdf
+pdfunite cover.pdf combined.pdf Claude-Code-Definitive-Guide.pdf
+rm cover.pdf combined.pdf
 ```
 
 ## License
