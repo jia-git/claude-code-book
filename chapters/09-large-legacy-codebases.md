@@ -4,11 +4,31 @@
 
 Small, well-structured projects are easy. Claude Code reads the whole thing in minutes, understands the architecture, and starts producing useful work immediately. The real test is a monorepo with two million files, a legacy codebase with three frameworks and no documentation, or a system so large that no single person understands all of it.
 
-These are the projects where Claude Code's value proposition is highest and where getting the approach wrong costs the most. This chapter covers the specific techniques for working with codebases that are too large to fit in context, too old to follow modern conventions, and too critical to rewrite carelessly. You will learn how git worktrees enable parallel work, how the Explore subagent navigates unfamiliar code efficiently, how task dependency management coordinates complex multi-step operations, and how teams have used Claude Code to compress three-year rewrites into weeks. You will also see how filesystem-driven analysis turns messy data exports into structured plans, how a storage layer migration demonstrates spec-driven refactoring at scale, and why the language barrier between modern developers and legacy systems written in decades-old languages is collapsing faster than anyone predicted.
+These are the projects where Claude Code's value proposition is highest and where getting the approach wrong costs the most. This chapter covers the specific techniques for working with codebases that are too large to fit in context, too old to follow modern conventions, and too critical to rewrite carelessly. You will learn how to configure a large repository so Claude loads only the instructions and files relevant to the code you are touching -- layered CLAUDE.md files, exclusions, read-deny rules for generated code, sparse worktrees, and code intelligence -- how git worktrees enable parallel work, how the Explore subagent navigates unfamiliar code efficiently, how task dependency management coordinates complex multi-step operations, and how teams have used Claude Code to compress three-year rewrites into weeks. You will also see how filesystem-driven analysis turns messy data exports into structured plans, how a storage layer migration demonstrates spec-driven refactoring at scale, and why the language barrier between modern developers and legacy systems written in decades-old languages is collapsing faster than anyone predicted.
 
 If your codebase makes new hires cry, this chapter is for you.
 
 ---
+
+## Configure the Repository for Scale
+
+Claude Code works at any size, but its defaults are tuned for a repository you can mostly hold in your head. Past that point, the defaults start filling the context window with instructions and file reads that have nothing to do with the task. The fix is not a cleverer prompt. It is a handful of settings that scope Claude to the part of the tree you are working in. They layer rather than replace each other, so apply whichever fit.
+
+**Choose where to start.** Launching from the repository root gives Claude every file and loads only the root CLAUDE.md at startup; subdirectory instructions load on demand as Claude touches them. Launching from a package directory scopes file access to that subtree and loads that directory's CLAUDE.md plus every ancestor's. The trap: project *settings* in `.claude/settings.json` are not inherited from parent directories, so a session started in a subdirectory reads that subdirectory's settings file, not the root's.
+
+**Layer CLAUDE.md by directory.** A root file with the rules that apply everywhere -- commit conventions, "never edit generated code" -- and one per package or subsystem with its own stack's conventions, maintained by whoever owns that code. When you work in the API package, the frontend's conventions never enter context. (Path-scoped rules in `.claude/rules/` are the centralized alternative, covered in Chapter 3.) For packages you never touch, `claudeMdExcludes` skips their instruction files entirely.
+
+**Deny reads of generated and vendored code.** Searches already respect `.gitignore`. For checked-in build output, generated clients, and vendored SDKs, add `Read` deny rules -- `Read(./**/dist/**/*)`, `Read(./**/vendor/**/*)` -- so Claude does not wander into fifty thousand lines of machine-written code looking for a definition. (Ending with `/**/*` rather than `/**` blocks the contents but still lets Claude list the directory.)
+
+**Install code intelligence.** A language-server plugin gives Claude go-to-definition, find-references, and live type errors after each edit. In a large typed codebase, one symbol lookup replaces a grep and three speculative file reads (Chapter 7). This pairs well with the deny rules: those keep irrelevant code out, and the language server keeps Claude from reading through what remains to find a definition.
+
+**Grant access across packages deliberately.** When a change spans packages, `--add-dir ../shared` grants file access to a sibling for one session, and loads its skills; the `additionalDirectories` setting grants file access persistently but loads neither skills nor instructions from the added directory. Set `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` if you want the sibling's CLAUDE.md too.
+
+**Put procedures in per-directory skills.** A `packages/api/.claude/skills/api-testing/` skill teaches the API package's testing patterns and loads only when relevant. Keep descriptions short and lead with the words a request would contain -- with hundreds of skills discovered, some lose their descriptions in the listing. Skills shared by many packages belong at the root, or in a plugin.
+
+**Centralize when layering stops scaling.** Past a certain size, per-directory files drift and nobody owns the root. That is the point to move conventions into a versioned plugin a platform team maintains and installs for everyone through managed settings -- and to expose any code-search index your organization already runs as an MCP tool, so Claude queries it instead of reading files. A SessionStart hook that maps the launch directory to the relevant plugin closes the discovery gap for engineers wandering into unfamiliar parts of the tree.
+
+Finally, for a change that spans packages -- a shared type and every call site -- give Claude the whole change in one session and plan it first. The plan file is re-injected after each compaction, so on a long cross-package session the plan survives where the conversation history may not.
 
 ## Git Worktrees for Parallel Work
 
@@ -27,7 +47,11 @@ This matters for large codebases because the biggest bottleneck is often sequent
 
 The pattern scales linearly. Three branches, three worktrees, three sessions. The limit is your machine's resources and your API budget, not anything architectural. For teams working on a monorepo with multiple independent features in flight, worktrees turn one Claude Code experience into several parallel ones.
 
-One practical detail: each worktree gets its own `.claude/` directory if one exists in the repository, so project-level CLAUDE.md and settings apply independently. This means CLAUDE.md content (as covered in Chapter 3) compounds across worktrees without conflict.
+Claude Code now does the bookkeeping for you. `claude -w feature-auth` creates a worktree under `.claude/worktrees/` and starts the session inside it; omit the name and one is generated. Pass a pull request number or URL -- `claude -w #482` -- and the worktree branches from that PR. A `.worktreeinclude` file lists gitignored files (local env files, generated config) to copy into each new worktree, and `worktree.baseRef` chooses whether new worktrees branch from the remote default or your local HEAD. Sessions dispatched from agent view and subagents defined with `isolation: worktree` get worktrees automatically (Chapter 4). For version control systems other than git, `WorktreeCreate` and `WorktreeRemove` hooks replace the mechanics entirely.
+
+Two settings matter at monorepo scale. `worktree.sparsePaths` uses sparse checkout so a worktree contains only the listed directories plus root-level files -- list `.claude` too if you want the root's settings and rules inside the worktree -- and `worktree.symlinkDirectories` links heavy directories like dependency folders back to the main checkout instead of duplicating them. A worktree with three packages checked out starts in seconds instead of minutes.
+
+One practical detail: inside a worktree, the session's working directory is the worktree root, so project settings load from the worktree's copy of the root `.claude/settings.json`. CLAUDE.md content (as covered in Chapter 3) compounds across worktrees without conflict, and auto memory is shared across all worktrees of the same repository, so a lesson learned in one is available in the others.
 
 ## File Suggestion Customization for Monorepos
 
@@ -43,13 +67,13 @@ This is a small feature with outsized impact. In a ten-thousand-file monorepo, b
 
 When you do not know where to look, the Explore subagent is purpose-built for navigation.
 
-Explore is a read-only, low-cost subagent (its architecture is covered in Chapter 4). It cannot modify files or run commands that change state. It can only read, search, and report back. This makes it fast, cheap, and safe to deploy even in codebases where you are still learning the terrain.
+Explore is a read-only subagent (its architecture is covered in Chapter 4). It cannot modify files or run commands that change state. It can only read, search, and report back. This makes it safe to deploy even in codebases where you are still learning the terrain.
 
 The Explore subagent runs in its own context window, which means it can read dozens of files during its investigation without consuming your main conversation's context. It returns a summary. You get the answer without the cost of the journey.
 
 Explore also supports configurable thoroughness. For a quick question about where a function is defined, it searches narrowly and returns fast. For a comprehensive understanding of how a module works, it searches broadly, follows cross-references, and produces a detailed analysis. The thoroughness parameter lets you trade speed for depth.
 
-Use Explore liberally in large codebases. The cost is low -- it runs on the cheapest available model, and the results run in an isolated context. The alternative is using your main session to read files one by one, filling your context window with exploration that could have been delegated.
+Use Explore liberally in large codebases, with one adjustment from the first edition: Explore no longer runs on the cheapest model. It now uses the capable model, because a confident but wrong map of an unfamiliar system is the most expensive kind of mistake. The context benefit is unchanged -- the reading happens in an isolated window -- but the token bill is not trivial. For high-volume, low-stakes searches ("list every file that imports this module"), define your own explorer with `model: haiku`. The alternative is using your main session to read files one by one, filling your context window with exploration that could have been delegated.
 
 ## Parallel Research Subagents
 
@@ -78,6 +102,8 @@ The pattern works like this:
 For a large migration -- say, moving from one ORM to another across fifty modules -- this turns a manual coordination nightmare into a structured execution plan. The first wave migrates the core database layer. The second wave updates the modules that depend on it. The third wave updates the tests. Each wave can run with parallelism within it, but the waves themselves execute sequentially.
 
 This is infrastructure-grade project management, not clever prompting. It works because the dependency system is explicit and enforced, not because Claude Code is "smart enough to figure out the order." You define the structure. Claude Code executes it.
+
+Two current caveats. The task tools are opt-in on the newest models (Chapter 4), so turn them on if you want this explicit structure. And for a migration of this shape, a dynamic workflow is often the better container: the waves become phases in a script, each file is migrated by its own agent in an isolated copy, a verification pass checks every result, and the whole run can be paused, resumed, and saved for the next package.
 
 ## Filesystem-Driven Analysis
 
@@ -218,10 +244,12 @@ The codebases that seem impossible to work with are not impossible. They are jus
 
 ## Key Takeaways
 
-- Git worktrees enable parallel Claude Code sessions on different branches of the same repository, with no interference between sessions.
-- The Explore subagent (Haiku, read-only, isolated context) is cheap enough to use liberally for navigating unfamiliar code.
+- Configure the repository before you prompt: choose where to launch, layer CLAUDE.md by directory, exclude what you never touch, deny reads of generated and vendored code, and install a code intelligence plugin.
+- Project settings are not inherited from parent directories; a session started in a subdirectory reads that directory's settings file.
+- Git worktrees enable parallel Claude Code sessions on different branches; `claude -w` creates them, `.worktreeinclude` copies the gitignored files they need, and `worktree.sparsePaths` keeps them small in a monorepo.
+- The Explore subagent is read-only and isolated, but now runs on the capable model -- define a cheaper explorer for high-volume, low-stakes searches.
 - Parallel research subagents provide multi-perspective understanding of large systems in minutes instead of hours.
-- Task dependency management with `blocks`/`blockedBy` enables wave-based execution for complex migrations and refactors.
+- Task dependency management with `blocks`/`blockedBy` enables wave-based execution; dynamic workflows are now often the better container for large migrations.
 - Legacy rewrites succeed when the target architecture is clear, the existing code serves as the specification, and the work is modular.
 - Claude Code's effectiveness on large codebases is limited by task clarity and context quality, not by codebase size -- one documented case achieved 99.9% numerical accuracy across a 12.5-million-line codebase.
 - The language barrier for legacy systems written in older languages is disappearing; agents can read, understand, and translate business logic that most modern developers cannot.

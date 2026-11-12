@@ -14,35 +14,47 @@ The developers who treat Claude Code as a faster keyboard are leaving most of it
 
 Every request to Claude Code includes context: your CLAUDE.md, MCP tool definitions, system prompt, conversation history. Without caching, you pay full price for this context on every single turn. With caching, identical prefixes are stored and reused, dramatically reducing the cost of repeated context.
 
-Prompt caching is enabled by default in Claude Code. You do not need to configure it. It works automatically by detecting that the beginning of your request -- the system prompt, CLAUDE.md content, tool definitions -- has not changed since the last turn. The cached portion costs a fraction of the full input price.
+Prompt caching is enabled by default in Claude Code. You do not need to configure it. It works automatically by detecting that the beginning of your request -- the system prompt, CLAUDE.md content, tool definitions, and the conversation so far -- has not changed since the last turn. The cached portion costs a fraction of the full input price.
 
-The economic implication is significant: the things that make Claude Code effective (rich CLAUDE.md, detailed MCP tool schemas, comprehensive system prompts) are exactly the things that benefit most from caching. A 400-line CLAUDE.md loaded on every request sounds expensive. With caching, you pay full price once and a discounted rate on subsequent turns within the same session.
+The economic implication is significant: the things that make Claude Code effective (rich CLAUDE.md, tool definitions, comprehensive system prompts) are exactly the things that benefit most from caching. A long CLAUDE.md loaded on every request sounds expensive. With caching, you pay full price once and a discounted rate on subsequent turns within the same session.
 
-This also means that session length has favorable economics. The first turn of a session pays full context costs. Every subsequent turn benefits from the cache. Longer sessions amortize the initial cost across more turns. This is one reason why the interrupt-and-steer workflow (as covered in Chapter 8) is not just more effective but also more economical than starting fresh sessions repeatedly.
+This also means that session length has favorable economics -- up to a point. The first turn of a session pays full context costs. Every subsequent turn benefits from the cache. But a cache has a lifetime: five minutes or an hour, depending on your plan and settings. Step away for longer and your next message re-processes the entire conversation at full price, which in a session holding several hundred thousand tokens is not a rounding error. That is why Claude Code now compacts large idle conversations in the background just before the cache would expire, why `/usage` warns before you resume an old, heavy conversation, and why the habit of `/clear` between unrelated tasks saves money as well as quality.
+
+Some actions break the cache even mid-session. Switching models forces a slow, uncached turn. Changing the set of loaded tools -- connecting an MCP server, reloading plugins in a way that changes them -- invalidates the prefix. Edits to CLAUDE.md do not take effect until the next session or compaction, precisely so that they do not break the cache every time you save. And `/compact` itself is a large request, since it reads the whole conversation. `/usage` now shows a prompt-cache line for the session -- the share of input tokens served from cache, misses and their likely cause, and whether the cache is warm -- so you can see these effects rather than guess at them.
+
+Caching also shapes multi-agent economics. A forked subagent starts with your exact prefix and reads your cache on its first request. In a dynamic workflow, agents with matching configuration share a cached prefix, and Claude Code deliberately staggers their start so the later ones hit the cache the first one wrote.
 
 ## Model Selection Tradeoffs
 
-Claude Code supports multiple models, and the choice matters both for quality and cost. The current model hierarchy:
+Claude Code supports multiple models, and the choice matters both for quality and cost. Any specific version number in a book will be stale by the time you read it -- the first edition was written in the Opus 4.6 era, and three model generations have shipped since -- so think in families and use the aliases (`opus`, `sonnet`, `haiku`), which always resolve to the current version. Pin exact versions only where reproducibility demands it.
 
-**Sonnet** handles the majority of coding work. It is fast, cost-effective, and produces reliable code for well-defined tasks. Most sessions should default to Sonnet.
+**Opus** is now the default for most plans, and it provides the deepest reasoning in the standard lineup for architectural decisions, complex refactors, and tasks where subtlety matters. It is the most expensive per token in that lineup.
 
-**Opus** provides deeper reasoning for architectural decisions, complex refactors, and tasks where subtlety matters. It is significantly more expensive per token but produces higher-quality output for ambiguous or high-stakes work.
+**Sonnet** handles the bulk of well-defined coding work at a lower price, and the current generation is close enough to Opus on routine implementation that many teams default to it for subagents and teammates.
 
-**Haiku** is the speed and cost champion. It powers the Explore subagent for good reason: it reads code, searches files, and returns summaries at a fraction of the cost of larger models. For reconnaissance work, Haiku is the obvious choice.
+**Haiku** is the speed and cost champion -- and it now ships with a million-token window and supports auto mode. Use it for high-volume, low-stakes work: classification, summarization, mechanical edits, cheap custom explorers. (Note that the built-in Explore agent no longer defaults to it; Chapter 4.)
 
-The cost-optimization pattern that emerges from this hierarchy: use an expensive model for orchestration and planning, and cheaper models for execution. An Opus session that plans the work and dispatches Sonnet subagents to implement it gets the best of both worlds -- architectural quality from Opus, implementation speed from Sonnet, at a blended cost lower than running Opus for everything.
+Above the standard lineup sits a newer, more capable tier, available on some plans and never the default. Reserve it for problems that genuinely resist the standard models.
 
-Subagents make this pattern practical because each subagent can be configured with its own model. Your main session runs on Opus. Your implementation subagents run on Sonnet. Your exploration subagents run on Haiku. The cost-quality tradeoff is optimized at each level.
+Two other dials change the cost curve without changing the model. **Effort level** (next section) often matters more than model choice. And **fast mode** runs supported models faster at a premium per-token rate, which is worth it when the bottleneck is your own waiting rather than the token bill.
+
+The cost-optimization pattern that emerges from this hierarchy: use an expensive model for orchestration and planning, and cheaper models for execution. A session that plans on Opus and dispatches Sonnet subagents to implement gets the best of both worlds -- architectural quality where it matters, implementation speed and price where it does not, at a blended cost lower than running Opus for everything. `opusplan` automates the simplest version: Opus in plan mode, Sonnet for execution.
+
+Subagents make this pattern practical because each subagent can be configured with its own model and effort level. Your main session runs on Opus. Your implementation subagents run on Sonnet. Your bulk-search agents run on Haiku at low effort. And the advisor tool offers the inverse arrangement -- a cheaper main model that consults a stronger one only at the hard decision points -- which can be the better deal for long, mostly routine sessions.
 
 ## Token Usage Optimization
 
-Beyond model selection, the context cost model covered in Chapter 3 has direct economic implications. The structural patterns for reducing token consumption -- subagent isolation for verbose operations, on-demand skills instead of always-loaded CLAUDE.md content, concise CLAUDE.md files, and plan-first execution -- are not just engineering best practices. They are cost optimizations. A 500-line CLAUDE.md processed over 100 turns costs real money. Moving reference material to skills that load on demand saves tokens on every turn the skill is not needed. Planning before execution prevents the 500,000-token misdirected implementation. The context engineering techniques from Chapter 3 are the foundation of token cost control.
+Beyond model selection, the context cost model covered in Chapter 3 has direct economic implications. The structural patterns for reducing token consumption -- subagent isolation for verbose operations, on-demand skills instead of always-loaded CLAUDE.md content, concise CLAUDE.md files, and plan-first execution -- are not just engineering best practices. They are cost optimizations. A bloated CLAUDE.md processed over hundreds of turns costs real money, cache discount or not.
+
+The newer cost drivers are mostly about things that run while you are not looking. Every subagent, every workflow agent, every agent-team teammate sends its own requests; teams in plan mode can run roughly seven times the tokens of a single session. A `/loop` or session-scoped scheduled task re-sends your full context each time it fires, even while you are idle. Cross-session messages and goal check-ins can start new turns in an idle session. Background sessions in agent view each draw on your plan independently. None of these is wasteful when used deliberately; all of them are expensive when forgotten.
+
+The good news is that the tooling now points at the problem for you. On subscription plans, `/usage` breaks recent consumption down by skill, subagent, plugin, MCP server, and loop, and turns each heavy item into a recommendation -- trim this CLAUDE.md, lower this effort level, compact before you step away -- with a single keystroke to apply the ones it can. For API and cloud billing, `--max-budget-usd` caps a scripted run, and the JSON output reports each run's estimated cost. Moving reference material to skills that load on demand saves tokens on every turn the skill is not needed. Planning before execution prevents the 500,000-token misdirected implementation. The context engineering techniques from Chapter 3 are the foundation of token cost control.
 
 ## Deployment Billing Models
 
 Claude Code is available through several billing structures, and the choice affects both cost management and organizational flexibility.
 
-**Per-seat subscription** (Teams and Enterprise plans) provides a fixed monthly cost per developer. This model simplifies budgeting and works well for teams with consistent, predictable usage. The cost is the same whether a developer runs ten sessions or a hundred in a month.
+**Per-seat subscription** (Teams and Enterprise plans) provides a fixed monthly cost per developer, with a usage allowance per seat that resets on a rolling five-hour window and a weekly window, shared with the rest of the Claude apps. This model simplifies budgeting and works well for teams with consistent, predictable usage. When a developer hits the allowance, usage credits -- with spend limits an administrator sets per organization, group, or person -- let work continue past it, billed at usage rates.
 
 **Pay-as-you-go** (API and console access) charges based on actual token consumption. This model works better for variable usage patterns, experimentation, and CI/CD pipelines where usage spikes during deployments and drops to zero during quiet periods.
 
@@ -68,20 +80,20 @@ The shift has implications for how teams are structured. When each developer can
 
 ## Reasoning Cost Control
 
-Not all tokens are equal. Claude Code's thinking -- the reasoning it does before producing output -- has its own cost profile, and controlling it is a practical economic lever.
+Not all tokens are equal. Claude Code's thinking -- the reasoning it does before producing output -- is billed as output tokens, and controlling it is a practical economic lever.
 
-Interleaved thinking allows Claude to reason between tool calls, producing better decisions but consuming more tokens. The thinking mode and effort level settings let you adjust this tradeoff:
+On current models, reasoning is adaptive: the model decides how much to think per request, guided by the **effort level** you choose -- `low`, `medium`, `high`, `xhigh`, or `max` (Chapter 8). Defaults differ by model; the newest generation defaults to `medium`, and several recent models defaulted higher. The fixed thinking budget the first edition described (`MAX_THINKING_TOKENS`) applies only to older models, and on the newest ones thinking cannot be switched off at all -- effort is the only dial.
 
-- Higher effort levels produce more thorough reasoning, useful for complex architectural decisions.
+- Higher effort levels produce more thorough reasoning, useful for complex architectural decisions, and spend more.
 - Lower effort levels produce faster, cheaper responses, suitable for straightforward implementation tasks.
 
-With Opus 4.6, reasoning uses adaptive allocation: instead of a fixed thinking token budget, the model dynamically allocates thinking based on the effort level you select (low, medium, or high). You adjust effort in the `/model` command using arrow keys, and the change takes effect immediately. The `CLAUDE_CODE_EFFORT_LEVEL` environment variable sets it globally. For other models, the `MAX_THINKING_TOKENS` environment variable caps the thinking budget at a specific number of tokens. Setting it to zero disables thinking entirely on any model.
+Set effort per session with `/effort`, per launch with `--effort`, persistently with the `effortLevel` setting, and -- the underused option -- per skill or subagent with an `effort:` frontmatter field. Organizations can cap it with `maxEffortLevel`. And `ultrathink` in a prompt now raises effort for that one turn, which is the cheapest way to buy deep reasoning for the single hard question in an otherwise routine session.
 
-One counter-intuitive detail: phrases like "think harder" or "ultrathink" in your prompts are interpreted as regular instructions. They do not allocate additional thinking tokens. The thinking budget is controlled exclusively through the configuration mechanisms above, not through conversational requests.
+The economic implication: match the reasoning investment to the task. Do not pay for deep reasoning on a simple file rename. Do not skimp on reasoning for a security-critical refactor. `/usage` will flag it when a session at maximum effort is driving a large share of your spend.
 
-The economic implication: match the reasoning investment to the task. Do not pay for deep reasoning on a simple file rename. Do not skimp on reasoning for a security-critical refactor.
+Ultracode, which turns every substantive task into a dynamic workflow, is the far end of this curve: the most thorough result Claude Code can produce, at a multiple of the tokens. Turn it on for the work that justifies it, and off when you return to routine tasks.
 
-This connects to the model selection strategy: Opus with high reasoning effort for architectural planning, Sonnet with moderate reasoning for implementation, Haiku with minimal reasoning for exploration. Each combination represents a different price-performance point on the cost curve.
+This connects to the model selection strategy: Opus at high effort for architectural planning, Sonnet at moderate effort for implementation, Haiku at low effort for bulk mechanical work. Each combination represents a different price-performance point on the cost curve.
 
 ## Timeline Reduction Evidence
 
@@ -302,15 +314,15 @@ When the cost of implementation drops by an order of magnitude, the economics ch
 
 ## Task Horizons Expanding
 
-Early agents handled one-shot tasks that took a few minutes: fix this bug, write this function, generate this test. By late 2025, increasingly capable agents were producing full feature sets over the course of several hours. The trajectory points toward agents working for days at a time, building entire applications with minimal human intervention focused on strategic oversight at key decision points.
+Early agents handled one-shot tasks that took a few minutes: fix this bug, write this function, generate this test. By late 2025, increasingly capable agents were producing full feature sets over the course of several hours. By late 2026 the infrastructure for multi-day work had caught up with the models: cloud sessions and projects that keep running with your laptop closed, goals an evaluator checks after every turn, resumable workflows, and scheduled tasks that wake an agent on a timer or an event. The trajectory points toward agents working for days at a time, building entire applications with minimal human intervention focused on strategic oversight at key decision points.
 
 This expansion changes the economics of what projects are viable. When agent task horizons are measured in minutes, you can automate small fixes. When measured in hours, you can automate feature development. When measured in days or weeks, you can automate entire product development cycles. The planning overhead -- decomposing work, providing context, reviewing output -- stays roughly constant, while the work performed per planning cycle increases dramatically.
 
-## Four Priorities for 2026
+## Four Priorities for 2026 and 2027
 
 The trends above converge on four priorities that separate organizations treating agentic development as a strategic capability from those treating it as a productivity tool.
 
-**First: master multi-agent coordination.** Single-agent workflows hit complexity ceilings. Organizations that learn to decompose work across coordinated agents -- planners, implementers, testers, reviewers -- handle complexity that single-agent systems cannot address.
+**First: master multi-agent coordination.** Single-agent workflows hit complexity ceilings. Organizations that learn to decompose work across coordinated agents -- planners, implementers, testers, reviewers -- handle complexity that single-agent systems cannot address. The tooling for this (background sessions, agent teams, dynamic workflows) now exists; the skill of knowing which one a task needs is the scarce part.
 
 **Second: scale human-agent oversight through AI-automated review.** The bottleneck in scaling AI-assisted development is not the AI's ability to produce code. It is the human's ability to review it. Organizations that build automated review systems -- linting, testing, security scanning, style checking -- focus human attention where it matters most and let machines handle verifiable quality criteria.
 
@@ -320,30 +332,31 @@ The trends above converge on four priorities that separate organizations treatin
 
 ## Where Things Are Headed
 
-Predicting specific features is a losing game, but the direction of travel is clear from what competitors are building and what the ecosystem is demanding.
+Predicting specific features is a losing game, and the first edition's own predictions make the point. It listed what was missing: native multi-agent management interfaces with parallel execution dashboards; first-class CI and code review that would make automatic fixes "a single toggle"; longer-running, resumable jobs with progress tracking; and more official skill packs for testing, migrations, and security scanning. Within roughly nine months, every item shipped in some form -- agent view and the desktop app's parallel sessions, `/autofix-pr` and the managed Code Review service, background sessions, cloud scheduled tasks and resumable dynamic workflows, and bundled skills plus official plugins for code review, verification, and security scanning.
 
-Workspace-style planning interfaces -- where task definition, specification, plan, and code changes are visible and editable as separate panels rather than interleaved in a conversation -- are a natural evolution. Claude Code's plan mode already separates planning from execution. A visual surface for that separation is a logical next step.
+The lesson is not that the predictions were clever. It is that the *direction* was obvious and the *pace* was underestimated. So rather than another list, here is the direction, stated as tensions that the next round of features will have to resolve:
 
-Native multi-agent controls with explicit management UIs -- agent tabs, profiles, parallel execution dashboards -- would bring Claude Code's powerful but CLI-driven multi-agent capabilities to a broader audience. The primitives exist. The interface layer is what is missing.
+**Autonomy versus attention.** Auto mode, `/goal`, background sessions, and scheduled tasks all remove a human from a loop. Each one makes the remaining human checkpoints -- review, verification, the decision to merge -- more valuable and more overloaded. Expect the next gains to come from tools that triage what deserves a human's eyes, not from tools that remove more of them.
 
-First-class CI and code review skills -- packaged recipes for reading failing test logs, proposing patches, and opening pull requests automatically -- would bring Claude Code's agentic capabilities into the workflows where most code quality decisions are made. One competitor already offers automatic fix suggestions during CI runs. The capability exists in Claude Code through skills and MCP, but it is not yet a single toggle.
+**Scale versus trust.** Dynamic workflows can run hundreds of agents; cross-checking their findings is what makes the output usable. Verification -- agents refuting other agents, evaluators checking conditions, findings confirmed before they are reported -- is becoming a first-class part of orchestration rather than an afterthought.
 
-Longer-running project-level jobs with checkpoints and progress dashboards would extend the task horizon from hours to days. Better resume and retry support, job identifiers, resumable sessions, and visual progress tracking in web and desktop interfaces would make overnight and multi-day agent work practical.
+**Extensibility versus governance.** Skills, plugins, hooks, mods, and MCP servers make Claude Code infinitely customizable, and every one of them runs with a developer's permissions. The organizations that get leverage from that extensibility will be the ones that treat their Claude Code configuration the way they treat production code: versioned, reviewed, measured, and owned.
 
-More official skill packs from Anthropic -- for CI, testing, migrations, and security scans -- would reduce the setup cost for common workflows and establish best practices that individual teams currently have to discover independently.
-
-The pragmatic question is not "should I wait for these?" but "what should I build now and what should I wait for?" Build with Claude Code now for repo-wide refactors, agentic workflows, deep reasoning tasks, and any scenario where understanding a large codebase is the bottleneck. Use a hybrid toolchain for inline autocomplete and rapid iteration within an editor. Watch for multi-agent UIs, CI integration recipes, and longer-running job support as the gaps most likely to close in the near term.
+The pragmatic question is still not "should I wait for these?" but "what should I build now?" Build with Claude Code now for repo-wide refactors, agentic workflows, deep reasoning tasks, automated review, and any scenario where understanding a large codebase is the bottleneck. Use a hybrid toolchain for inline autocomplete. And before you build a workaround for a missing capability, check the release notes -- the odds that it is already in progress are higher than they look.
 
 ---
 
 ## Key Takeaways
 
 - Prompt caching makes rich context (CLAUDE.md, MCP tools, system prompts) economically viable by charging full price only once per session.
-- Match models to tasks: Opus for architecture, Sonnet for implementation, Haiku for exploration -- and use subagents to mix models within a session. Control reasoning costs with effort levels (low/medium/high) and the `CLAUDE_CODE_EFFORT_LEVEL` environment variable.
+- Match models to tasks: Opus for architecture, Sonnet for implementation, Haiku for bulk mechanical work -- use the aliases so you always get the current version, and use subagents to mix models within a session.
+- Effort level (`low` through `max`) is the main reasoning-cost dial on current models; set it per session, per skill, or per subagent, and use `ultrathink` for single hard turns.
+- Prompt caching rewards long, focused sessions but punishes long idle gaps, model switches, and tool-set changes; `/usage` shows your cache hit rate and what is driving your spend.
+- Background work -- subagents, workflows, teams, loops, background sessions -- is where modern token spend hides; check it before blaming the main conversation.
 - Three compounding multipliers -- agent capabilities, orchestration improvements, and accumulated human experience -- produce step-function gains rather than linear ones.
 - Timeline compression of 70-90% changes project viability: an eight-week production platform instead of three to six months, a two-to-three-day feature instead of two to three weeks.
 - A hybrid toolchain (Claude Code for repo-scale reasoning, a dedicated inline tool for keystroke-level autocomplete) outperforms either tool alone because they operate at different interaction scales.
 - Claude Code's competitive strength is repo-scale planning and patch generation in large codebases; other tools lead in inline autocomplete, visual multi-agent management, and CI integration.
 - Everyone becomes more full-stack: backend developers build frontend applications in hours, designers make state management changes, and non-technical teams build entirely new capabilities.
 - Technical debt becomes systematically addressable when agents work through backlogs at compressed cost, tackling tasks that never cleared the priority threshold before.
-- Four priorities for 2026: master multi-agent coordination, scale oversight through automated review, extend agentic coding beyond engineering, and embed security architecture from day one.
+- Four priorities for 2026 and 2027: master multi-agent coordination, scale oversight through automated review, extend agentic coding beyond engineering, and embed security architecture from day one.

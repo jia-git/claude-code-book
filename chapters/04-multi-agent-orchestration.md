@@ -4,45 +4,53 @@
 
 The moment your task outgrows a single context window, you have two choices: fight the constraint or distribute the work. Multi-agent orchestration is how you distribute the work.
 
-Claude Code ships with a subagent system that lets you spin up isolated AI workers, each with its own context window, its own tool permissions, and its own system prompt. For more ambitious coordination, an experimental agent teams system lets multiple independent sessions communicate through seven coordination primitives, shared task lists, and direct messaging. These are fundamentally different architectures with different cost profiles, different failure modes, and different sweet spots.
+When the first edition of this book was written, there were two ways to do that: subagents inside a session, and an experimental agent-teams system. There are now five, and they differ along two axes that matter more than any feature list -- who holds the plan, and how involved you stay. Subagents are workers Claude spawns and supervises turn by turn, now running in the background by default, able to inherit the whole conversation as forks, and allowed to spawn their own subagents. Background sessions are full conversations you dispatch and monitor from a single screen, each in its own git worktree. Agent teams are a lead session supervising peer sessions that message each other -- still experimental, and simpler than they were. Dynamic workflows move the plan out of Claude's head and into a script, orchestrating dozens to hundreds of agents with results cross-checked before you see them. And projects in the cloud keep a stream of related work running for days while your laptop is closed.
 
-This chapter covers both in depth. You will learn the six built-in subagent types, how to define custom subagents with persistent memory, hooks, turn limits, and preloaded skills. You will understand the seven agent team primitives, four message types, three display modes, task dependencies, file-locking for concurrent claims, and plan approval workflows. You will see why a practitioner's four-agent trading hierarchy degraded to a single agent because simplicity won, and why a QA swarm of five parallel agents audited an entire blog in three minutes. You will also learn the task system that coordinates work across sessions and subagents, and why the cheapest orchestration strategy is almost always the correct one.
+This chapter covers all of them, with the most depth on the ones you will use daily. You will learn the built-in subagent types and every field that shapes a custom one, how background execution and forks change the economics of delegation, how agent view turns parallel sessions into a dispatch board, how a workflow script differs from a team of agents, and why sessions you run yourself can now pass findings to each other. You will see why a practitioner's four-agent trading hierarchy degraded to a single agent because simplicity won, and why a QA swarm of five parallel agents audited an entire blog in three minutes. And you will learn why the cheapest orchestration strategy is almost always the correct one.
 
 ---
 
 ## The Architecture of Subagents
 
-A subagent is a Claude Code session within a session. It gets its own context window, its own system prompt, and a restricted set of tools. When it finishes, it returns a summary to the parent session. Then its context window is discarded.
+A subagent is a Claude Code session within a session. It gets its own context window, its own system prompt, and a restricted set of tools. When it finishes, it returns a summary to whoever spawned it. Then its context window is set aside.
 
-The key constraint: subagents cannot spawn other subagents. This creates a strict two-level hierarchy. You have an orchestrator (your main session) and workers (subagents). There is no middle management. No delegation chains. No recursive agent trees. This is a deliberate design decision, not a limitation. Recursive agent hierarchies sound elegant and produce chaos.
+The first edition described a hard rule: subagents cannot spawn other subagents, and that strict two-level hierarchy was "a deliberate design decision, not a limitation." It was both. The rule is gone. Subagents can now spawn their own subagents, three layers deep by default (`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` changes the limit; `1` restores the old behavior). At the limit, the Agent tool is simply withheld. The original warning still stands, though, and it is worth repeating because the guardrail that enforced it no longer does: recursive agent hierarchies sound elegant and frequently produce chaos. Nesting is for a worker that genuinely needs its own helpers -- a reviewer that fans out one checker per file -- not for org charts.
 
-Six built-in subagent types ship with Claude Code:
+A note on naming before going further. The tool Claude uses to spawn subagents was renamed from `Task` to `Agent`. `Task(...)` still works as an alias in permission rules and older configuration, but new configuration should say `Agent`.
 
-**Explore subagents** run on a smaller, cheaper model optimized for speed. They are read-only -- they can search files, read code, and navigate the codebase, but they cannot modify anything. Use them when you need to understand something before deciding what to do. They are fast and cheap enough to spin up casually.
+The built-in subagent types:
 
-**Plan subagents** inherit the main session's model. They are also read-only, but they bring the full reasoning capability of the orchestrator model to bear on research and planning tasks. Use them when the planning itself is complex enough to warrant dedicated context.
+**Explore** is read-only -- it can search files, read code, and navigate the codebase, but it cannot modify anything. It takes a thoroughness level (quick, medium, or very thorough) and skips CLAUDE.md and git status to start fast. One change matters for your budget: Explore no longer defaults to a small, cheap model. It runs on the capable model -- the main model, or the `opus` alias on direct subscriptions -- because a careless reconnaissance pass turned out to be expensive in a different way. If you want cheap exploration, define your own explorer with `model: haiku`.
 
-**General-purpose subagents** have access to all tools. They can read, write, execute commands, and perform multi-step tasks. These are your workhorses for implementation.
+**Plan** inherits the main session's model. It is also read-only, and it does the research during plan mode. Use it when the planning itself is complex enough to warrant dedicated context.
 
-**Bash subagents** are specialized for command execution. They are useful when you need to run a sequence of shell commands without polluting the main context with verbose output.
+**General-purpose** has access to all tools. It can read, write, execute commands, and perform multi-step tasks. This is your workhorse for implementation.
 
-**Claude Code Guide subagents** are specialized for answering questions about Claude Code itself -- its features, configuration, and best practices. They consult the product's own documentation.
+**claude** is the catch-all, and the default agent for sessions you dispatch to the background.
 
-**Statusline-setup subagents** handle the narrow task of configuring terminal status line integrations. They exist because the setup process is fiddly enough to warrant isolated context.
+**claude-code-guide** answers questions about Claude Code itself, consulting the product's own documentation. **statusline-setup** handles the narrow task of configuring your status line.
 
-You can also define custom subagents as Markdown files with YAML frontmatter, specifying system prompts, tool restrictions, model preferences, and turn limits. These definitions live in `.claude/agents/` for project scope or `~/.claude/agents/` for user scope. Plugins can supply them too, at the lowest priority.
+Explore and Plan are one-shot: they cannot be resumed. If you would rather Claude never use them, deny `Agent(Explore)` in your permissions, or set `CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS=1`.
+
+You can also define custom subagents as Markdown files with YAML frontmatter. Definitions live in `.claude/agents/` for project scope or `~/.claude/agents/` for user scope; managed settings, the `--agents` flag, and plugins supply them too. When the same name appears in several places, managed wins, then the CLI flag, then project, then user, then plugin. Directories are scanned recursively, and edits are picked up within seconds. The `/agents` command used to open a wizard for this; it now just reminds you where the files live. The faster path is to describe the agent you want and let Claude write the file.
 
 ### Custom Subagent Definition Fields
 
-Beyond the basics of system prompt and tool restrictions, custom subagent definitions support several fields that shape behavior in important ways:
+Only `name` and `description` are required. The description is how Claude decides when to delegate, so lead with the use case. Beyond the system prompt in the body, the fields that shape behavior most:
 
-**`maxTurns`** limits the number of agentic turns before a subagent stops. This is a safety valve. A subagent exploring a codebase might spiral into increasingly tangential searches. Setting `maxTurns: 20` caps the exploration and forces a result. Without it, a subagent on a dead-end path burns tokens until context runs out.
+**`tools` and `disallowedTools`** set an allowlist and a denylist. Omit `tools` and the agent inherits everything. A denylist entry with a specifier, such as `Bash(git push *)`, removes the whole tool -- denylists are blunt instruments.
 
-**`mcpServers`** configures which MCP servers are available to a specific subagent. You can reference servers defined in `.mcp.json` by name or inline a full server configuration. This means a database-reader subagent can have access to your database MCP server while a code-reviewer subagent has none. Tool access scoped to the subagent's role, not the session's full capability set.
+**`model`** takes `sonnet`, `opus`, `haiku`, `fable`, a full model ID, or `inherit`. Resolution order: a model named on the individual invocation, then this field, then `CLAUDE_CODE_SUBAGENT_MODEL`, then the main conversation's model. **`effort`** sets the subagent's own effort level, which is often the bigger lever.
 
-**`skills`** preloads skill content into the subagent's context at launch. In the main session, skills load on demand -- only the description is present until Claude invokes the skill. Subagents work differently. Skills passed to a subagent are fully injected into its context at startup because the subagent needs to act immediately without the interactive skill-loading flow. This means every skill you preload costs context from turn one.
+**`maxTurns`** limits the number of agentic turns before a subagent stops. This is a safety valve. A subagent exploring a codebase might spiral into increasingly tangential searches. Setting `maxTurns: 20` caps the exploration; the output is marked partial and can be resumed. Without it, a subagent on a dead-end path burns tokens until something else stops it.
 
-**`memory`** enables persistent memory, covered in detail later in this chapter.
+**`mcpServers`** configures which MCP servers are available to a specific subagent. You can reference servers by name or inline a full server configuration. A database-reader subagent can have the database server while a code-reviewer subagent has none. Tool access scoped to the role, not the session.
+
+**`skills`** preloads skill content into the subagent's context at launch. In the main session, skills load on demand. Subagents work differently: listed skills are fully injected at startup because the subagent needs to act immediately. Every skill you preload costs context from turn one.
+
+**`isolation: worktree`** runs the subagent in a temporary git worktree branched from the default branch, so its edits cannot collide with yours. The worktree is cleaned up if the subagent made no changes.
+
+**`background: true`** keeps the subagent in the background even when Claude would otherwise wait for it. **`permissionMode`**, **`hooks`**, **`memory`** (covered later), **`omitClaudeMd`** (skip the user and project CLAUDE.md for a clean-room reviewer), **`autoCompactWindow`**, **`color`**, and **`initialPrompt`** (an auto-submitted first turn when the agent runs as the main session) round out the set. Unknown fields are silently ignored, which means a typo fails quietly. Check spelling.
 
 ### The `--agents` CLI Flag
 
@@ -53,24 +61,24 @@ claude --agents '{
   "code-reviewer": {
     "description": "Reviews code for style and correctness",
     "prompt": "You are a code reviewer. Check for bugs, style violations, and security issues.",
-    "tools": ["Read", "Glob", "Grep"],
+    "tools": ["Read", "Bash"],
     "model": "sonnet"
   },
   "debugger": {
     "description": "Debugs failing tests",
     "prompt": "You are a debugging specialist. Analyze test failures and suggest fixes.",
-    "tools": ["Read", "Glob", "Grep", "Bash"],
+    "tools": ["Read", "Edit", "Bash"],
     "model": "sonnet",
     "maxTurns": 30
   }
 }'
 ```
 
-The `--agents` flag accepts the same fields as file-based definitions: `description`, `prompt`, `tools`, `disallowedTools`, `model`, `permissionMode`, `mcpServers`, `hooks`, `maxTurns`, `skills`, and `memory`. This is particularly useful in headless pipelines where you want to define specialized agents without committing Markdown files to the repository.
+The flag accepts the same fields as file-based definitions, and Claude Code validates the JSON at startup instead of failing halfway through a run. In print mode the value can also be a path to a JSON file, which is far easier to maintain in a pipeline than an inline string. This is particularly useful in headless pipelines where you want specialized agents without committing Markdown files to the repository.
 
 ### The `--agent` Flag
 
-A related but distinct flag: `--agent` runs a custom agent definition as the main thread rather than as a subagent. If you have a `code-reviewer` agent defined in `.claude/agents/code-reviewer.md`, running `claude --agent code-reviewer` starts the session using that agent's system prompt, tools, and configuration. The session runs as a top-level agent, not as a worker within another session. You can restrict which subagents this top-level agent can spawn using `Task(agent_type)` syntax, creating controlled hierarchies where a review agent can only delegate to explorer-type subagents.
+A related but distinct flag: `--agent` runs a custom agent definition as the main thread rather than as a subagent. If you have a `code-reviewer` agent defined in `.claude/agents/code-reviewer.md`, running `claude --agent code-reviewer` starts the session using that agent's system prompt, tools, and configuration. The same can be set per project with `"agent": "code-reviewer"` in settings. You can restrict which subagent types this top-level agent can spawn by listing them in its tools -- `tools: Agent(worker, researcher), Read` -- creating controlled hierarchies where a review agent can only delegate to the helpers you chose.
 
 ## Context Isolation Is the Point
 
@@ -78,63 +86,97 @@ The most important thing subagents give you is not parallelism. It is context is
 
 When you ask the main session to read a large file, parse verbose test output, or explore a sprawling directory tree, all of that content accumulates in the main context window. Do this enough times and you hit the ceiling described in Chapter 1 -- instructions get forgotten, work gets dropped, quality degrades.
 
-Subagents solve this by containing the mess. A subagent can read fifty files, parse a thousand lines of test output, explore every directory in the repo, and the main session only sees the summary. The verbose intermediate work stays in the subagent's context and is discarded when the subagent finishes.
+Subagents solve this by containing the mess. A subagent can read fifty files, parse a thousand lines of test output, explore every directory in the repo, and the main session only sees the summary. The verbose intermediate work stays in the subagent's context.
 
 This is why experienced users route expensive context operations through subagents even when they do not need parallelism. Reading a large codebase module? Subagent. Running a comprehensive test suite and analyzing failures? Subagent. Searching for usage patterns across hundreds of files? Subagent. The goal is keeping the orchestrator's context lean so it can coordinate effectively across dozens of tasks without losing coherence.
 
+What a fresh subagent starts with is precise: its own system prompt, the delegation message, CLAUDE.md (unless skipped), a git status snapshot, any preloaded skills, and -- when messaging is available -- a roster of its siblings. It does not inherit your conversation, your output style, or your auto memory. It does inherit your extended-thinking configuration.
+
 The tradeoff is that summaries are lossy. A subagent that returns a detailed result consumes main context proportional to the length of that result. If you spin up ten subagents and each returns a page of findings, you have ten pages of results in your main window. The solution is to instruct subagents to be concise in their returns -- specific answers, not comprehensive reports.
+
+## Forks: Subagents That Remember
+
+Context isolation has a cost the first edition glossed over: a fresh subagent knows nothing. Every delegation message has to re-explain the project, the decisions made so far, and the thing you are actually trying to do. For a quick side task, writing that briefing can take longer than doing the task.
+
+A *forked* subagent inverts the tradeoff. Instead of starting fresh, it inherits the full conversation -- system prompt, tools, history -- and goes off to work on one thing in the background while you keep going. Its result returns to your conversation when it finishes. Type `/subtask` followed by the task to spawn one yourself. Fork mode is also on by default, which means Claude itself will fork when a side task needs the context you have built up -- checking whether a refactor broke a distant caller, say, while it keeps implementing.
+
+Forks are cheaper than they look. Because a fork starts with exactly the same prefix as your conversation, its first request reads your conversation's prompt cache instead of paying to process the history again. The isolation property is preserved where it matters: whatever the fork reads and runs afterward stays in its context, not yours.
+
+Use a fresh subagent when the worker should not be biased by your conversation -- a reviewer grading code it did not watch being written. Use a fork when the worker needs to know what you know. (`CLAUDE_CODE_FORK_SUBAGENT=0` turns fork mode off.)
 
 ## Foreground vs. Background Execution
 
-Subagents can run in the foreground or the background, and the distinction matters more than it appears.
+Subagents can run in the foreground or the background, and the default flipped since the first edition.
 
-**Foreground subagents** block the main conversation. The orchestrator waits for them to finish before proceeding. They have full access to MCP tools, can ask clarifying questions if they get stuck, and integrate seamlessly with the permission system. Use foreground execution when the subagent's result determines the next step.
+**Background is now the default** for subagents Claude spawns from the main conversation. Claude keeps working while they run. Up to twenty can run at once per session (`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` adjusts that). The old restrictions are mostly gone too: background subagents keep their MCP tools, and when one needs a permission it was not pre-granted, the prompt now appears in your main session labeled with the subagent's name instead of being silently auto-denied. Background subagents get a slightly reduced set of built-in tools, and they cannot ask you clarifying questions.
 
-**Background subagents** run concurrently while the main session continues. This is where parallelism actually happens -- you can have multiple background subagents exploring different parts of the codebase or implementing different components simultaneously. But background execution comes with restrictions: no MCP tools, no clarifying questions, and permissions must be pre-negotiated before launch. If a background subagent encounters something that needs human approval and was not pre-approved, it auto-denies and moves on.
+**Foreground subagents** block the main conversation until they finish. Use foreground when the subagent's result determines the next step -- set `background: false` on a forked skill, or have Claude wait. Setting `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` forces everything into the foreground, along with every other background feature.
 
-Background subagents can be resumed in the foreground if they complete with unresolved questions or partial results. This is useful for tasks that start as background exploration but surface something that needs interactive discussion. Press **Ctrl+B** to background a running foreground task -- it continues working while you regain the main session. If a background subagent fails due to missing permissions, you can resume it in the foreground to retry with interactive prompts.
+The controls are worth memorizing. **Ctrl+B** moves a running foreground task to the background. `/tasks` lists everything running in the background of the session -- subagents, shell commands, workflows -- and lets you check on, attach to, or stop each one. Named background subagents show up in the `@`-mention typeahead with their status. And **Ctrl+X Ctrl+K**, pressed twice, stops every running background subagent at once -- the emergency brake when a fan-out goes wrong.
 
-The practical pattern is to use foreground for tasks where you need the result immediately and background for tasks that can run while you focus on something else. A common orchestration workflow: launch three background subagents to explore three modules, continue working on something else in the main session, then review their results when they complete.
+The practical pattern has not changed: launch three background subagents to explore three modules, keep working on something else in the main session, then review their results when they complete. What changed is that this is now what happens when you do nothing special.
 
 ### Resuming Subagents
 
-Subagent transcripts persist independently of the main conversation. They are stored as separate files at `~/.claude/projects/{project}/{sessionId}/subagents/`. When the main conversation compacts, subagent transcripts are unaffected. You can resume a subagent after restarting Claude Code by resuming the same session -- ask Claude to "continue that code review" and it picks up from the persisted transcript.
+Every completed subagent returns an ID, and Claude can resume it by sending it a message -- addressed by ID or by the name Claude gave it. A resumed subagent keeps its full history, so a reviewer that spent twenty minutes analyzing an authorization module can answer a follow-up question without redoing the analysis.
 
-This persistence means subagent work is not lost when the main session resets. A subagent that spent twenty minutes analyzing an authorization module has its full transcript on disk. Resuming gives it that context back without re-doing the analysis.
+Subagent transcripts persist independently of the main conversation, stored as separate files under the session's directory in your Claude Code project data. When the main conversation compacts, subagent transcripts are unaffected, and they survive a restart if you resume the session. They are cleaned up after thirty days by default.
 
 ### Subagent Auto-Compaction
 
-Subagents support automatic compaction using the same logic as the main conversation. By default, auto-compaction triggers at approximately 95% capacity. For subagents that handle large volumes of data -- parsing thousands of lines of test output, reading dozens of files -- this means they can work through content that exceeds their context window by periodically summarizing and continuing.
+Subagents support automatic compaction using the same logic as the main conversation. For subagents that handle large volumes of data -- parsing thousands of lines of test output, reading dozens of files -- this means they can work through content that exceeds their context window by periodically summarizing and continuing.
 
-Set `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` to a lower percentage (for example, `50`) to trigger compaction earlier. This applies to both main conversations and subagents. Earlier compaction reduces peak context consumption at the cost of potentially losing detail from earlier turns. For subagents doing broad exploration, earlier compaction is usually fine. For subagents doing precise analysis where every detail matters, let them run closer to capacity before compacting.
+The `autoCompactWindow` field in a subagent's definition sets its own compaction threshold, from 100K tokens up. It can lower the session-wide value but not raise it. Earlier compaction reduces peak context consumption at the cost of losing detail from earlier turns. For subagents doing broad exploration, earlier compaction is usually fine. For subagents doing precise analysis where every detail matters, let them run closer to capacity.
 
 ## Subagent Hooks
 
-Custom subagents support lifecycle hooks that run at specific points during execution. These are defined in the agent's YAML frontmatter and work with the same event model as session-level hooks (Chapter 2), but scoped to the subagent.
+Custom subagents support lifecycle hooks that run at specific points during execution. These are defined in the agent's YAML frontmatter and work with the same event model as session-level hooks (Chapter 2), but scoped to the subagent. Project-level agent files need workspace trust before their hooks run.
 
 Three hook events fire within the subagent's execution: **PreToolUse** runs before the subagent uses a tool and can block or modify the invocation. **PostToolUse** runs after a tool completes and can transform output or trigger side effects. **Stop** runs when the subagent finishes -- but at runtime, it is automatically converted to a **SubagentStop** event.
 
-Two additional hook events fire at the project level, outside the subagent's own context: **SubagentStart** fires when any subagent spawns, and **SubagentStop** fires when any subagent finishes. These are defined in your project or user settings, not in the subagent definition itself. A SubagentStart hook can inject `additionalContext` into the subagent -- instructions or data that supplement its system prompt without modifying the agent definition. A SubagentStop hook can block the subagent from stopping (exit code 2), useful for enforcing that a subagent must produce certain artifacts before it is allowed to finish.
+Two additional hook events fire at the project level, outside the subagent's own context: **SubagentStart** fires when any subagent spawns, and **SubagentStop** fires when any subagent finishes. These are defined in your project or user settings, matched by agent name. A SubagentStart hook can inject `additionalContext` into the subagent -- instructions or data that supplement its system prompt without modifying the agent definition. A SubagentStop hook can block the subagent from stopping (exit code 2), useful for enforcing that a subagent must produce certain artifacts before it is allowed to finish.
 
 A practical example: a database-reader subagent with a PreToolUse hook on the Bash tool that checks whether commands contain SQL write operations (INSERT, UPDATE, DELETE, DROP). If the hook detects a write statement, it returns a deny decision, preventing the subagent from modifying production data regardless of what its instructions say. This is defense in depth -- the subagent's system prompt says "read only," and the hook enforces it mechanically.
 
 ## Subagent Patterns
 
-Three patterns recur in production subagent usage. They are worth naming because they solve specific orchestration problems.
+Four patterns recur in production subagent usage. They are worth naming because they solve specific orchestration problems.
 
 **Chain subagents** run in sequence, where each subagent completes its task and returns results to the orchestrator, which then passes relevant information to the next subagent. Subagent A analyzes the authentication module and returns a list of vulnerabilities. The orchestrator passes that list to Subagent B, which generates fixes. Subagent B's output goes to Subagent C, which writes tests. Each subagent has clean context with only the information it needs. The chain structure prevents context accumulation while maintaining information flow.
 
-**Isolate high-volume operations** by routing anything that produces large output to a subagent. Running a comprehensive test suite might generate thousands of lines of output. Fetching documentation from an API might return hundreds of pages. Processing log files might involve scanning megabytes of text. If this happens in the main session, it crowds out everything else. A subagent absorbs the volume and returns a concise summary: "14 tests failed, all in the auth module, all related to session expiry."
+**Isolate high-volume operations** by routing anything that produces large output to a subagent. Running a comprehensive test suite might generate thousands of lines of output. Fetching documentation might return hundreds of pages. Processing log files might involve scanning megabytes of text. If this happens in the main session, it crowds out everything else. A subagent absorbs the volume and returns a concise summary: "14 tests failed, all in the auth module, all related to session expiry."
 
 **Parallel research** spawns multiple subagents simultaneously to investigate different aspects of a problem. Three subagents explore the authentication module, the database layer, and the API endpoints in parallel. Each returns findings. The orchestrator synthesizes them into a unified understanding. This is faster than sequential exploration and keeps the orchestrator's context free of the intermediate exploration steps.
 
-## Agent Teams: The Experimental Layer
+**Adversarial review** spawns a fresh subagent to check work the main session just did. Because it sees only the diff and the criteria you give it -- not the reasoning that produced the change -- it evaluates the result on its own terms. The bundled `/code-review` command packages exactly this pattern, running in the background and reporting findings back to the session (Chapter 6). Tell a reviewer to flag only issues that affect correctness or the stated requirements: a reviewer told to find gaps will always find some, and chasing every one produces over-engineering.
 
-Agent teams are a different architecture entirely. Where subagents are workers within a session, agent teams are independent Claude Code sessions that coordinate through shared infrastructure.
+## Background Sessions and Agent View
+
+Subagents are workers inside your session. Sometimes you want the opposite: several whole sessions, each working on its own task, while you check in only when one needs you. That used to mean a wall of terminal tabs. It now has a dedicated surface.
+
+`claude agents` opens **agent view**, a single screen listing every background session, grouped by state: working, needs input, idle, completed, failed, stopped. Type a prompt and press Enter to dispatch a new session; each prompt starts its own. From the shell, `claude --bg "investigate the flaky test"` does the same and returns immediately. From inside a session, `/background` (or pressing the left arrow on an empty prompt) moves the current conversation into the background and frees your terminal, and `/fork` copies the conversation into a new background session while you keep working on the original.
+
+The interaction model is built around not attaching. Press Space on a row to peek at the latest output or the pending question and reply right there. Press Enter to attach for the full conversation; detaching never stops a session. Rows linked to a pull request show its number, colored by status. Sessions keep running after you close agent view or the terminal, because a small supervisor process hosts them.
+
+Two details make this safe to use at scale. First, a dispatched session moves into its own git worktree before it edits anything, so ten parallel sessions do not write into the same checkout. Second, dispatched sessions take their permission mode from the target directory's settings -- and refuse overly permissive project settings -- with defaults you can set at launch: `claude agents --permission-mode plan --model opus --effort high`.
+
+Agent view is a research preview, and each background session draws on your plan quota independently. Dispatch ten and you will feel it. But for the work pattern of "hand off five independent tasks, glance at the board between meetings, step in on the one that is stuck," nothing else in the toolbox fits as well. `claude agents --json` exposes the same state to scripts.
+
+## Cross-Session Messaging
+
+The sessions you run yourself used to be islands. If one discovered that the shared type the other was building on had changed, you were the messenger. Now Claude can list your other Claude Code sessions -- on this machine, on another machine, or in the cloud -- and send them a message. `/list-agents` shows who is reachable; typing `@` in the prompt mentions another session by name.
+
+Two safety rules make this tolerable. A session treats an incoming message as coming from another Claude, not from you, so a message cannot approve a permission prompt or supply consent on your behalf -- one session cannot launder an action another was denied. And you can hold inbound messages instead of having them delivered as new turns, which matters because each delivered message re-sends the receiving session's full context.
+
+This is the lightweight middle ground between independent sessions and a full agent team: no lead, no shared task list, just a way for parallel work to pass a finding along.
+
+## Agent Teams: Still Experimental, Now Simpler
+
+Agent teams are a different architecture entirely. Where subagents are workers within a session, agent teams are independent Claude Code sessions -- a lead and its teammates -- that coordinate through a shared task list and direct messages. They remain experimental and disabled by default.
 
 ### Enabling Agent Teams
 
-Agent teams are disabled by default. Enable them by setting the `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` environment variable to `1`, either in your shell or through settings:
+Enable them by setting the `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` environment variable to `1`, either in your shell or through settings:
 
 ```json
 {
@@ -144,130 +186,49 @@ Agent teams are disabled by default. Enable them by setting the `CLAUDE_CODE_EXP
 }
 ```
 
-Then describe what you want in natural language. Claude creates the team, spawns teammates, and coordinates work based on your prompt.
+Then describe what you want in natural language: "Spawn three teammates to explore this from different angles: one on UX, one on architecture, one playing devil's advocate." Teams only form in interactive sessions; in `-p` runs and the SDK, Claude spawns ordinary subagents instead.
 
-### The Seven Team Primitives
+One side effect catches people out. While teams are enabled, any subagent Claude *names* when it spawns it launches as a teammate. Claude names subagents on its own so it can message them later, so teams can form when you never asked for one. If that is not what you want, set the variable back to `0` -- the next spawn picks it up without a restart.
 
-The system provides seven tools that handle the full lifecycle of team coordination.
+### How Teams Work Now
 
-**TeamCreate** initializes a team. It creates a team directory and configuration file on disk. The `team_name` parameter is the namespace that links everything -- tasks, messages, and config all live under it.
+The first edition described seven primitives -- create the team, create tasks, spawn, message, broadcast, delete the team. Much of that ceremony is gone. The team for a session is set up automatically when the session starts, under a session-derived name; there is exactly one per session, and its configuration is cleaned up when the session ends. Teammates are simply subagents that Claude spawns with a name while teams are enabled. What remains is the part that made teams interesting:
 
-```
-TeamCreate({ "team_name": "auth-refactor", "description": "Refactor authentication module" })
-```
+**A shared task list.** The lead creates tasks; teammates claim them, either by assignment or by picking up the next unassigned, unblocked task on their own. Tasks have three states -- pending, in progress, completed -- and can depend on each other. A pending task with unresolved dependencies cannot be claimed, and completing a task unblocks its dependents automatically. Claiming uses file locking, so two teammates cannot grab the same task.
 
-**TaskCreate** defines a unit of work. Each task becomes a JSON file on disk. The lead creates tasks before spawning teammates, providing enough detail in the description to serve as a prompt for the agent that picks it up.
+**Direct messaging.** Any teammate can message any other by name. Messages are delivered automatically; nobody polls. When a teammate finishes, it notifies the lead with its final answer. There is no broadcast: to reach everyone, send one message per recipient, which keeps the cost of chattiness visible.
 
-```
-TaskCreate({
-  "subject": "Extract JWT handling into jwt.ts",
-  "description": "Move all token signing and verification logic from auth.ts to a new jwt.ts module...",
-  "team_name": "auth-refactor"
-})
-```
+**Graceful shutdown.** Ask the lead to shut a teammate down by name; the teammate can approve and exit or decline with an explanation.
 
-**TaskUpdate** moves work through the pipeline. Teammates use it to claim tasks (setting status to `in_progress` with an owner) and to mark tasks complete. The status field prevents two agents from working on the same task simultaneously.
-
-```
-TaskUpdate({ "taskId": "1", "status": "in_progress", "owner": "jwt-agent" })
-TaskUpdate({ "taskId": "1", "status": "completed" })
-```
-
-**TaskList** returns all tasks with their current status. Teammates call this after completing a task to find what is next. There is no centralized scheduler -- each teammate polls TaskList, finds unowned pending tasks, and claims one. This is the shared coordination mechanism.
-
-**Task (with team_name)** spawns a teammate. The critical detail: each teammate is a full Claude Code session with its own context window. Teammates load the same project context (CLAUDE.md, MCP servers, skills) but do not inherit the lead's conversation history. You can specify the model for each teammate independently.
-
-```
-Task({
-  "subagent_type": "general-purpose",
-  "name": "jwt-agent",
-  "team_name": "auth-refactor",
-  "model": "sonnet"
-})
-```
-
-**SendMessage** is what makes teams different from subagents. Any teammate can message any other teammate directly. It supports four message types:
-
-- **`message`**: direct communication between two agents. A teammate reports findings to the lead, or one teammate asks another for information.
-- **`broadcast`**: reaches all teammates at once. Use sparingly -- costs scale with team size because every teammate processes the message.
-- **`shutdown_request` / `shutdown_response`**: graceful teardown protocol. The lead sends a shutdown request; the teammate acknowledges with a response. A teammate can reject the shutdown with an explanation if it has unfinished work.
-- **`plan_approval_response`**: quality gate. The lead approves or rejects a teammate's implementation plan.
-
-```
-// Teammate reports findings to lead
-SendMessage({
-  "type": "message",
-  "recipient": "lead",
-  "content": "JWT extraction complete. Created jwt.ts with signToken and verifyToken exports."
-})
-
-// Lead requests graceful shutdown
-SendMessage({
-  "type": "shutdown_request",
-  "recipient": "jwt-agent",
-  "content": "All tasks complete, shutting down team."
-})
-```
-
-**TeamDelete** removes the team config and all task files from disk. Called after all teammates have shut down.
-
-### The Team Lead Abstraction
-
-What makes agent teams more than parallel subagents is the team lead's coordination role. The lead is the session that creates the team. It is responsible for creating tasks and defining work breakdown, spawning teammates with appropriate roles, monitoring progress through the task list, synthesizing results from multiple agents, and handling graceful shutdown.
-
-The task files on disk and SendMessage are the only coordination channels -- there is no shared memory. Teammates each have their own conversation history and context window, independent from the lead and from each other. This independence is the source of both the architecture's strength (true parallel work with full context isolation) and its cost (each teammate is a full Claude Code session burning tokens independently).
-
-A lead can be put into **delegate mode** (Shift+Tab after starting a team). In delegate mode, the lead cannot implement tasks itself -- it can only coordinate: spawning, messaging, shutting down teammates, and managing tasks. This prevents the lead from doing work that should be distributed to teammates, which is a surprisingly common failure mode.
+Each teammate is a full Claude Code session with its own context window. Teammates load the same project context as any session -- CLAUDE.md, MCP servers, skills -- plus the spawn prompt from the lead. They do not inherit the lead's conversation history, so put the task-specific details in the spawn prompt. You can name a reusable subagent definition when spawning ("spawn a teammate using the security-reviewer agent type"), and the teammate picks up that definition's tools, model, and instructions.
 
 ### Display Modes
 
-Agent teams support three display modes, configured via the `teammateMode` setting or the `--teammate-mode` flag:
+Teammates display **in-process** by default: they run inside your main terminal, listed in an agent panel below the prompt. Use the arrow keys to select a teammate, Enter to view its transcript and message it directly, Escape to interrupt its turn, `x` to stop it, and Ctrl+T to toggle the task list. This works in any terminal.
 
-**`auto`** (default) uses split panes if you are already running inside a tmux session, and in-process otherwise.
-
-**`in-process`** runs all teammates inside your main terminal. Use Shift+Up/Down to select a teammate and type to message them directly. Press Enter to view a teammate's session, Escape to interrupt their current turn, Ctrl+T to toggle the task list. Works in any terminal with no extra setup.
-
-**`tmux`** gives each teammate its own terminal pane. You can see everyone's output simultaneously and click into a pane to interact directly. Split-pane mode requires tmux or iTerm2 -- it does not work in a code editor's integrated terminal.
-
-```bash
-# Force in-process for a single session
-claude --teammate-mode in-process
-```
-
-### Task Dependencies and File Locking
-
-Tasks can depend on other tasks. A pending task with unresolved dependencies cannot be claimed until those dependencies complete. When a teammate finishes a task that others depend on, blocked tasks unblock automatically. This creates a natural wave pattern: independent tasks run in parallel first, dependent tasks follow.
-
-Task claiming uses file locking to prevent race conditions when multiple teammates try to claim the same task simultaneously. Without file locking, two agents polling TaskList at the same moment could both attempt to claim the same task, leading to duplicated work. The lock ensures exactly one agent owns each task.
+Split panes give each teammate its own pane so you can watch everyone at once. Set `teammateMode` to `auto` to use split panes when you are already inside a terminal multiplexer session, or name the multiplexer explicitly. Split panes do not work in a code editor's integrated terminal or some standalone terminals; the in-process default does.
 
 ### Plan Approval
 
-For complex or risky tasks, you can require teammates to plan before implementing. The teammate works in read-only plan mode until the lead approves their approach:
-
-```
-Spawn an architect teammate to refactor the authentication module.
-Require plan approval before they make any changes.
-```
-
-When a teammate finishes planning, it sends a plan approval request to the lead. The lead reviews the plan and either approves it (teammate exits plan mode and begins implementation) or rejects it with feedback (teammate stays in plan mode, revises, and resubmits). You can influence the lead's judgment by giving it criteria in your prompt: "only approve plans that include test coverage" or "reject plans that modify the database schema."
-
-This is the difference between "trust the agents to do the right thing" and "verify the approach before spending tokens on implementation." For a team of five agents running in parallel, each burning thousands of tokens per minute, the plan approval step is cheap insurance.
+For risky work, put the lead in plan mode before asking for a teammate. A teammate spawned while the lead is planning works read-only until its plan is ready, then sends a plan approval request. The lead's session approves the request automatically -- the teammate exits plan mode and begins implementation -- and the teammate's edits and commands still go through the normal permission prompts in the lead session. So the value of plan approval is now mostly sequencing: the plan exists, in writing, before any file changes. If you want a human gate, read the plan before the teammate's first permission prompt arrives.
 
 ### Team Hook Events
 
-Two hook events are specific to agent teams:
+Three hook events are the natural quality gates for teams:
 
-**TeammateIdle** fires when an agent team teammate is about to go idle -- it has finished its current work and is ready to stop. Exit code 2 from this hook forces the teammate to continue working. A practical use: a hook that checks whether build artifacts exist in the expected output directory before allowing the teammate to stop. If the artifacts are missing, the hook rejects the idle state and the teammate keeps working.
+**TeammateIdle** fires when a teammate is about to go idle. Exit code 2 sends feedback and keeps it working. A practical use: check that build artifacts exist in the expected output directory before allowing the teammate to stop.
 
-**TaskCompleted** fires when a task is marked as completed via TaskUpdate, or when a teammate finishes its turn with in-progress tasks still assigned. Exit code 2 blocks the completion. This enables quality gates: a hook that runs the test suite when a task is marked complete, blocking the completion if tests fail. The teammate sees the failure output and can self-correct.
+**TaskCreated** fires when a task is being created. Exit code 2 prevents it -- useful for enforcing task-size or naming conventions.
+
+**TaskCompleted** fires when a task is being marked complete. Exit code 2 blocks the completion and feeds the reason back. This enables the most useful gate of all: run the test suite when a task is marked complete, and refuse the completion if tests fail.
 
 ### Agent Teams vs. Subagents: Detailed Comparison
 
 | | Subagents | Agent Teams |
 |---|---|---|
-| **Context** | Own window; results return to the caller | Own window; fully independent |
-| **Communication** | Report results back to the main agent only | Teammates message each other directly |
-| **Coordination** | Main agent manages all work | Shared task list with self-claim |
+| **Context** | Own window; results return to the caller (forks inherit the conversation) | Own window; fully independent |
+| **Communication** | Return results to the caller; named subagents can message each other | Teammates message each other directly |
+| **Coordination** | Main agent manages all work | Shared task list with self-claim, plus messages |
 | **Token cost** | Lower: results summarized back to main | Higher: each teammate is a full session |
 | **Best for** | Focused tasks where only the result matters | Complex work requiring discussion and collaboration |
 
@@ -277,23 +238,69 @@ The distinction matters most when agents need to talk to each other. An API team
 
 Agent teams are experimental and come with real constraints:
 
-- **No session resumption** for in-process teammates. If a teammate crashes, its work and context are lost.
-- **Task status can lag** -- teammates sometimes forget to mark tasks complete, which can block dependent tasks.
-- **One team per session.** You cannot run nested teams or multiple teams from one lead session.
-- **Split panes require tmux or iTerm2**, not a code editor's integrated terminal.
-- **All teammates start with the lead's permission settings.** You cannot give one teammate broader permissions than the lead has.
+- **No resumption of in-process teammates.** `/resume` and `/rewind` do not restore them; after resuming, tell the lead to spawn new teammates.
+- **Task status can lag** -- teammates sometimes forget to mark tasks complete, which can block dependent tasks. Nudge them, or update the task yourself.
+- **One team per session, and no nested teams.** Teammates cannot spawn teammates, and in-process teammates cannot run background subagents of their own.
+- **The lead is fixed.** You cannot promote a teammate or transfer leadership.
+- **Teammates do not isolate in worktrees.** Partition the work so each owns different files; two teammates editing one file will overwrite each other.
+- **Permissions are set at spawn.** Teammates start with the lead's permission mode (except don't-ask mode, which they do not inherit). You can change an individual teammate afterward, but not at spawn time.
+- **Cost.** Each teammate is a full session; in plan mode, a team can use roughly seven times the tokens of a single session. Start with three to five teammates and five or six tasks each.
 
-## Subagents vs. Teams: When to Use What
+## Dynamic Workflows: When the Plan Becomes Code
 
-The decision between subagents and teams maps to scope, cost, and coordination complexity.
+Every orchestration approach so far has one thing in common: Claude is the orchestrator. It decides, turn by turn, what to spawn next, and every result lands in a context window. That works for a handful of workers. It breaks down at fifty, and it cannot be rerun.
 
-**Subagents** are right when: the work decomposes into independent tasks that can be completed without coordination, each task fits in a single subagent session, and you need results quickly and cheaply. A typical subagent workflow takes minutes and costs a fraction of a main session.
+A dynamic workflow moves the plan out of Claude's head and into a script. You describe the task; Claude writes a JavaScript program that orchestrates subagents; a runtime executes it in the background while your session stays responsive. The script holds the loops, the branching, and the intermediate results in variables, so Claude's context receives only the final answer. A saved script looks like this:
 
-**Teams** are right when: the work requires sustained coordination between specialists, tasks have dependencies that need to be tracked, or the problem requires different agents maintaining long-running context about different aspects of the system. A typical team workflow takes longer and costs several times what subagents would.
+```javascript
+export const meta = {
+  name: 'audit-routes',
+  description: 'Audit every route handler for missing auth checks',
+}
+
+const found = await agent('List every .ts file under src/routes/.', {
+  schema: { type: 'object', required: ['files'],
+            properties: { files: { type: 'array', items: { type: 'string' } } } },
+})
+
+const audits = await pipeline(found.files, file =>
+  agent(`Audit ${file} for missing authentication checks.`, { label: file }),
+)
+
+return audits.filter(Boolean)
+```
+
+`agent()` spawns one subagent, optionally constrained to return JSON matching a schema. `pipeline()` runs one per item; `parallel()` runs a set at once; `phase()` groups agents under a title in the progress view.
+
+The difference is not just scale. Because the orchestration is code, a workflow can apply a quality pattern a single pass cannot: have independent agents adversarially verify each other's findings before anything is reported, or draft a plan from several angles and weigh them. The bundled `/deep-research` workflow does exactly this for questions that need many sources -- fan out searches, cross-check claims, vote, and filter out what did not survive.
+
+**Starting one.** Ask for it in plain words ("use a workflow to migrate every component under src/components/ to TypeScript, each file in its own isolated copy"), or include the keyword `ultracode` in your prompt. To have Claude plan a workflow for every substantive task in the session, run `/effort ultracode` -- thorough, and correspondingly hungry for tokens. Claude shows the planned phases and asks before the first run, depending on your permission mode.
+
+**Watching and steering.** `/workflows` opens a progress view: phases with agent counts, drill-down into any agent's prompt, tool calls, and result, and keys to pause, restart an agent, or stop the run. A stopped or paused run is resumable in the same session; completed agents return their saved results instead of running again.
+
+**Keeping it.** Press `s` on a run you liked to save its script as a command -- in `.claude/workflows/` for the team, or your home directory for yourself. Saved workflows accept arguments, and plugins can ship them.
+
+**Bounds.** Sixteen agents run concurrently by default, a single run is capped at a thousand agents, and a `Large workflow` warning appears past twenty-five agents or a projected million and a half tokens. A size guideline in `/config` (small, medium, large) tells Claude how many agents to aim for. Test on one directory before you point a workflow at the whole repository.
+
+The rule of thumb: subagents when you want a few delegated tasks per turn; a team when long-running peers need to talk; a workflow when the job outgrows a handful of agents or you want the findings cross-checked before you see them.
+
+## Choosing an Approach
+
+The decision maps to three questions. Who should hold the plan -- Claude turn by turn (subagents), a lead session (teams), a script (workflows), or you (background sessions)? Do the workers need to talk to each other? And do they edit the same files?
+
+**Subagents** are right when the work decomposes into independent tasks that each fit in one context, and you need results quickly and cheaply. A typical subagent workflow takes minutes and costs a fraction of a main session.
+
+**Background sessions** are right when you have several unrelated tasks and want to hand them off and check back -- the work of a dispatcher, not an orchestrator.
+
+**Teams** are right when the work requires sustained coordination between specialists who need to react to each other's output.
+
+**Workflows** are right when the job is too large for turn-by-turn coordination, when you want verification baked in, or when you will run the same orchestration again.
 
 **Neither** is right when a single well-prompted session can handle the task. This is more common than you think. Before reaching for multi-agent orchestration, ask whether the task genuinely exceeds what one context window can handle. If the answer is no, a single agent with clear instructions will outperform a multi-agent setup every time. The coordination overhead of multi-agent systems is not free, and it introduces failure modes that single agents do not have.
 
-The hierarchy of preference: single agent first, subagents when context isolation is needed, teams when sustained coordination is needed. Work your way up, not down.
+The hierarchy of preference: single agent first, subagents when context isolation is needed, background sessions when you have independent work to hand off, teams or workflows when coordination or scale is genuinely needed. Work your way up, not down.
+
+For work that spans days and should keep running when your machine is off, there is one more rung: a *project* in the cloud, where you describe a stream of related tasks in one conversation and Claude runs them as parallel cloud sessions that share repositories, instructions, and memory (Chapter 7).
 
 ## Agent Team Case Studies
 
@@ -309,9 +316,9 @@ A practitioner pointed agent teams at their blog with a single prompt: use a tea
 | 4 | RSS, sitemap, SEO metadata | qa-seo | RSS validity, robots.txt, Open Graph tags |
 | 5 | Accessibility and HTML structure | qa-a11y | Heading hierarchy, ARIA attributes, theme toggle |
 
-Each agent finished independently and sent a structured report back via SendMessage. The agents used bash and curl to fetch pages and parse HTML directly -- no browser automation, no test framework. When all five completed, the lead synthesized their findings into a prioritized report with issues ranked by severity (major, medium, minor). Then the lead sent shutdown requests, teammates acknowledged, and TeamDelete cleaned up.
+Each agent finished independently and sent a structured report back to the lead. The agents used shell commands to fetch pages and parse HTML directly -- no browser automation, no test framework. When all five completed, the lead synthesized their findings into a prioritized report with issues ranked by severity (major, medium, minor), then shut the teammates down.
 
-The entire lifecycle -- from prompt to final report -- took about three minutes. Five agents, over 146 URLs tested, 83 blog posts checked. The cost was higher than a single session doing the same work sequentially, but the wall-clock time was a fraction.
+The entire lifecycle -- from prompt to final report -- took about three minutes. Five agents, over 146 URLs tested, 83 blog posts checked. The cost was higher than a single session doing the same work sequentially, but the wall-clock time was a fraction. Today the same job is also a natural fit for a dynamic workflow, which would add a verification pass that re-checks each reported broken link before it reaches the final report.
 
 ### The Authentication Module Refactor
 
@@ -323,13 +330,13 @@ This is the pattern where agent teams justify their cost. The agents needed to r
 
 The most effective agent team pattern is a two-step approach: plan first with plan mode, then hand the plan to a team for parallel execution.
 
-Step one: start in plan mode. Let the orchestrator explore the codebase, identify files, and produce a step-by-step implementation plan. Review it. Adjust it. This is cheap -- plan mode only reads files. The orchestrator might produce something like:
+Step one: start in plan mode. Let the orchestrator explore the codebase, identify files, and produce a step-by-step implementation plan. Review it. Adjust it. This is cheap -- plan mode researches and proposes without editing. The orchestrator might produce something like:
 
 ```
 Plan:
 1. Create src/auth/jwt.ts -- extract token signing/verification
 2. Create src/auth/sessions.ts -- extract session logic
-3. Create src/auth/middleware.ts -- extract Express middleware
+3. Create src/auth/middleware.ts -- extract HTTP middleware
 4. Update src/auth/index.ts -- re-export public API
 5. Update 12 import sites across the codebase
 6. Update tests in src/auth/__tests__/
@@ -348,23 +355,23 @@ Plan mode costs roughly 10,000 tokens. A team that goes in the wrong direction c
 Subagents can maintain a persistent memory directory that survives across sessions. Configure this with the `memory` field in the agent definition, specifying a scope:
 
 - **`user`**: shared across all projects. Stored at `~/.claude/agent-memory/{agent-name}/`. Use for agents whose knowledge applies everywhere -- coding style preferences, common debugging patterns, personal workflow rules.
-- **`project`**: shared within a project. Stored at `~/.claude/projects/{project}/agent-memory/{agent-name}/`. Use for project-specific agents -- a code reviewer that learns this codebase's conventions, a test agent that knows this project's testing patterns.
-- **`local`**: specific to one working directory. Use when different branches or worktrees of the same project need different agent knowledge.
+- **`project`**: shared within a project, and the recommended default. Stored in the repository at `.claude/agent-memory/{agent-name}/`, so it can be committed and shared with the team through version control. Use for project-specific agents -- a code reviewer that learns this codebase's conventions, a test agent that knows this project's testing patterns.
+- **`local`**: project-specific but personal. Stored at `.claude/agent-memory-local/{agent-name}/` and kept out of version control. Use for knowledge that should not be shared, or that varies by machine.
 
 The memory directory contains a `MEMORY.md` entrypoint and optional topic files:
 
 ```
-~/.claude/projects/{project}/agent-memory/code-reviewer/
+.claude/agent-memory/code-reviewer/
 ├── MEMORY.md          # Concise index, loaded into every session
 ├── style-patterns.md  # Detailed notes on code style observations
 └── common-issues.md   # Recurring problems this codebase has
 ```
 
-`MEMORY.md` acts as an index. The first 200 lines are loaded into the subagent's system prompt at the start of every invocation. Content beyond 200 lines is not loaded automatically -- Claude is instructed to keep the index concise by moving detailed notes into separate topic files. The subagent reads and writes files in this directory throughout its execution, using `MEMORY.md` to track what is stored where.
+`MEMORY.md` acts as an index. The first 200 lines (or 25KB, whichever comes first) are loaded into the subagent's system prompt at the start of every invocation. Turning memory on also grants the agent Read, Write, and Edit, since it needs them to maintain the files. Content beyond the limit is not loaded automatically -- Claude is instructed to keep the index concise by moving detailed notes into separate topic files. The subagent reads and writes files in this directory throughout its execution, using `MEMORY.md` to track what is stored where.
 
 Over multiple invocations, the subagent accumulates knowledge: patterns it has observed, decisions that worked, errors to avoid. A code review agent that learns your team's conventions produces better reviews after ten runs than it did after one. A test generation agent that remembers which test patterns caught real bugs focuses on high-value test cases.
 
-This is distinct from CLAUDE.md, which is always-on context for the main session (Chapter 3). Persistent memory is agent-specific and loads only when that agent runs. It is a way to give specialized agents domain knowledge without bloating the main session's context.
+This is distinct from CLAUDE.md, which is always-on context for the main session, and from the main session's own auto memory (Chapter 3), which subagents do not inherit. Persistent agent memory is agent-specific and loads only when that agent runs. Because the project scope lives in the repository, a reviewer's accumulated knowledge can go through code review like everything else. It is a way to give specialized agents domain knowledge without bloating the main session's context.
 
 ### Vector-Based Experience Retrieval
 
@@ -380,7 +387,9 @@ The most cost-effective multi-agent pattern is conceptually simple: use an expen
 
 Your orchestrator -- the main session -- does the planning, decomposition, and quality evaluation. This is where reasoning quality matters most, so it runs on the most capable model available. Your subagents do the implementation, exploration, and grunt work. Many of them can run on smaller models without meaningful quality loss.
 
-Explore subagents already implement this pattern by defaulting to a smaller, faster model. You can extend it to custom agents by specifying model preferences in the agent definition.
+This pattern is now something you configure rather than something you get for free. The built-in Explore agent used to default to a small model; it now runs on the capable one, on the theory that a sloppy exploration costs more in wrong conclusions than it saves in tokens. To get cheap hands, say so explicitly: `model: haiku` or `model: sonnet` in a custom agent's frontmatter, `effort: low` for mechanical work, or `CLAUDE_CODE_SUBAGENT_MODEL` to set a default for every subagent, teammate, and workflow agent. To keep Claude from spawning expensive workers on its own, add an ask rule for `Agent(model:opus)` (Chapter 2).
+
+The pattern also runs in reverse. The advisor tool (`/advisor`, or `--advisor opus` at launch) pairs a cheaper main model with a stronger *advisor* model that Claude consults only at the hard decision points of a task. Cheap brain for the routine turns, expensive brain on call for the forks in the road -- the same economics, inverted.
 
 The economics work because orchestration is a small fraction of total token usage. Planning a refactor might consume 10,000 tokens. Executing that refactor across twenty files might consume 500,000 tokens. If the execution runs on a model that costs a fifth as much per token, you have cut total costs by roughly 80% with no loss in planning quality.
 
@@ -424,9 +433,9 @@ The mitigation is threefold. First, start with a single agent and only add agent
 
 ## The Task System
 
-Beneath both subagents and agent teams is a shared task management system that persists work to disk and coordinates progress across sessions.
+Beneath agent teams sits a task management system that persists work to disk and coordinates progress across sessions. It has also quietly become optional, which is worth understanding before you build on it.
 
-Tasks are stored in `.claude/tasks/{session-id}/` as JSON files:
+Four tools manage the lifecycle: **TaskCreate** creates a task with a subject, description, and dependencies. **TaskUpdate** changes status (pending to in progress to completed) or modifies dependencies. **TaskList** shows all tasks, their status, and what is blocked. **TaskGet** retrieves a task's full details. Each task is a small JSON file:
 
 ```json
 {
@@ -439,13 +448,13 @@ Tasks are stored in `.claude/tasks/{session-id}/` as JSON files:
 }
 ```
 
-Four task tools manage the lifecycle: **TaskCreate** creates a new task with subject, description, and dependencies. **TaskUpdate** changes status (pending to in_progress to completed) or modifies dependencies. **TaskList** shows all tasks, their status, and what is blocked. **TaskGet** retrieves full details of a specific task including its description.
+Press **Ctrl+T** in an interactive session to toggle the task checklist in the status area.
 
-Press **Ctrl+T** in an interactive session to toggle the task list display in the terminal status area. Up to 10 tasks are visible at once, showing current status and progress.
+Here is the twist. On the newest models, these tools are not provided by default. The models track multi-step work well without a written checklist, and the tool definitions and reminders cost context on every turn. On those models Claude simply works through the steps, and the checklist stays empty. If you rely on the checklist -- for a visible plan, for team coordination, or for a dashboard -- opt back in with `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, or by naming one of the task tools in `--allowedTools`. Agents without the task tools coordinate through messages instead.
 
 ### Multi-Session Task Coordination
 
-The task system supports coordination across multiple Claude Code sessions. Set a shared task list ID:
+Where the task tools are available, they support coordination across multiple Claude Code sessions. Set a shared task list ID:
 
 ```bash
 CLAUDE_CODE_TASK_LIST_ID=myproject claude
@@ -461,25 +470,27 @@ Or add it to `.claude/settings.json`:
 }
 ```
 
-When multiple sessions share the same task list ID, they all read from and write to the same task files. One session can act as an orchestrator that creates tasks, while another session works through them. A third session can monitor completed tasks and add follow-up work. This is a lightweight coordination mechanism that does not require the full agent teams infrastructure -- just shared state on disk.
+When multiple sessions share the same task list ID, they all read from and write to the same task files. One session can act as an orchestrator that creates tasks, while another session works through them. A third session can monitor completed tasks and add follow-up work. This is a lightweight coordination mechanism that does not require the full agent teams infrastructure -- just shared state on disk. Combined with cross-session messaging, it covers most of what people reached for agent teams to do.
 
 ### The Autonomous Loop Pattern
 
-For projects spanning days or weeks, a pattern exists for truly autonomous work: a bash loop that feeds a markdown file into Claude Code repeatedly. Each iteration runs in a completely new session, using the markdown file as the only persistent memory. The loop reads the task list, picks the next uncompleted task, runs Claude Code with the spec document as context, and writes results back to the spec file. Then it loops.
+For projects spanning days or weeks, a pattern emerged before there were built-ins for it: a shell loop that feeds a markdown file into Claude Code repeatedly. Each iteration runs in a completely new session, using the markdown file as the only persistent memory. The loop reads the task list, picks the next uncompleted task, runs Claude Code with the spec document as context, and writes results back to the spec file. Then it loops.
 
 This is stateless and capable of running indefinitely. The spec file is the only state that persists. Each session starts clean, reads only what it needs, does its work, updates the spec, and exits. The next iteration picks up where the last one left off.
 
 The tradeoff is obvious: no conversation history, no accumulated context, no ability to remember what happened three iterations ago except what is written in the spec file. For tasks with clear specifications and well-defined acceptance criteria, this is sufficient. For exploratory work that requires remembering failed approaches, it is not.
 
+The pattern still works, and it is still the most transparent way to run for days. But check whether a built-in covers your case first. `/goal` keeps one session working turn after turn until a condition an evaluator model checks is met. `/loop` re-runs a prompt on an interval within a session -- or at an interval Claude chooses each time based on what it saw. Cloud scheduled tasks run a saved prompt against your repository on a schedule, from an API call, or on repository events, with nothing running on your machine. Chapter 6 covers all three.
+
 ## Parallel Instances Across Repos
 
-The simplest form of multi-agent work requires no orchestration infrastructure at all: run multiple Claude Code instances in different terminal windows, each working in a different repository or worktree.
+The simplest form of multi-agent work requires no orchestration infrastructure at all: run multiple Claude Code instances, each working in a different repository or worktree.
 
 Each instance has its own context window, its own session, and its own set of tools. They do not know about each other and they do not coordinate. This is fine when the tasks are genuinely independent -- updating three microservices that share an API but do not share code, for example.
 
-Git worktrees (Chapter 9) make this particularly effective, giving you parallel development with full code isolation across branches of the same repository.
+Git worktrees (Chapter 9) make this particularly effective, giving you parallel development with full code isolation across branches of the same repository. `claude -w feature-auth` starts a session in a fresh worktree in one step.
 
-This pattern is underrated because it is boring. There is no orchestration, no agent communication, no shared task lists. Just multiple instances doing independent work. But for many real-world scenarios -- working across repositories, maintaining multiple branches, handling unrelated tasks -- it is the most effective multi-agent pattern available.
+This pattern is underrated because it is boring. There is no orchestration, no agent communication, no shared task lists. Just multiple instances doing independent work. But for many real-world scenarios -- working across repositories, maintaining multiple branches, handling unrelated tasks -- it is the most effective multi-agent pattern available. Agent view simply gives it a dashboard, and cross-session messaging gives the instances a way to warn each other when one breaks what another depends on.
 
 ## Specialized Agents for Non-Engineering Work
 
@@ -530,12 +541,14 @@ Multi-agent orchestration is a power tool. Like all power tools, it amplifies bo
 ## Key Takeaways
 
 - Subagents provide context isolation more than parallelism -- route verbose operations through subagents to keep the orchestrator's context lean.
-- The strict two-level hierarchy (orchestrator and workers, no middle management) is a deliberate design choice that prevents recursive chaos.
-- Six built-in subagent types exist (Explore, Plan, General-purpose, Bash, Claude Code Guide, statusline-setup), and custom subagents support `maxTurns`, `mcpServers`, `skills` preloading, persistent `memory`, and lifecycle hooks.
-- Agent teams provide seven coordination primitives (TeamCreate, TaskCreate, TaskUpdate, TaskList, Task, SendMessage, TeamDelete) with four message types and three display modes.
+- Subagents now run in the background by default, surface their permission prompts in your session, and can nest three layers deep. The old two-level rule is gone; the reasons for it are not.
+- Forked subagents (`/subtask`, and fork mode by default) inherit the whole conversation and reuse its prompt cache -- use them when the worker needs to know what you know, and fresh subagents when it should not.
+- Built-in Explore now runs on the capable model. Cheap hands are something you configure: `model:` and `effort:` in frontmatter, or `CLAUDE_CODE_SUBAGENT_MODEL`.
+- Agent view (`claude agents`, `--bg`, `/background`, `/fork`) dispatches and monitors whole background sessions, each in its own worktree.
+- Agent teams are still experimental but simpler: one auto-created team per session, a shared task list, direct messages, and TeammateIdle/TaskCreated/TaskCompleted hooks as quality gates.
+- Dynamic workflows move the plan into a rerunnable script that can orchestrate hundreds of agents and cross-check their findings; start them by asking for a workflow or with `ultracode`.
 - Always plan before parallelizing; 10,000 tokens of planning prevents 500,000 tokens of wasted, conflicting execution.
-- Use expensive models for orchestration and cheap models for execution -- the economics heavily favor this split.
 - Multi-agent personality conflicts are real and sometimes resolve by simplifying back to a single agent; a four-agent trading hierarchy degraded to one because complexity was counterproductive.
-- The task system (Ctrl+T, stored as JSON in `.claude/tasks/`) coordinates work across sessions via `CLAUDE_CODE_TASK_LIST_ID`, enabling multi-session orchestration without full agent teams.
+- The task tools are off by default on the newest models; opt in with `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` if you depend on the checklist or `CLAUDE_CODE_TASK_LIST_ID` coordination.
 - Start with a single agent and add agents only when you have evidence that the single agent is insufficient.
-- The simplest multi-agent pattern -- multiple independent instances in different terminals -- is often the most effective.
+- The simplest multi-agent pattern -- multiple independent instances in separate worktrees -- is often the most effective.

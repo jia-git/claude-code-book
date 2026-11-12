@@ -15,3 +15,14 @@ Every effort was made to ensure accuracy, but this is a book written by AI about
 This book is free to share, distribute, and read. That was the whole point.
 
 — Vladimir Korostyshevskiy, February 2026
+
+
+## About the Second Edition
+
+The first edition went to press in February 2026. Nine months is a long time for a tool that ships several releases a week, and by November most of the book's predictions had either arrived or been overtaken. Auto mode became the default for interactive sessions. Subagents started running in the background by default. The million-token window became ordinary. Commands the first edition taught were renamed, merged, or removed, and features it listed under "wait for" shipped.
+
+This edition was produced by Claude Code working under the same assignment file and the same constraints. This time the source material was narrower and more current: the official Claude Code documentation as it stood in November 2026, against which every chapter and appendix was revised. Chapters keep their structure and their arguments where the arguments still hold. Where the tool changed underneath an argument, the chapter says so -- what the first edition recommended, what changed, and what to do now -- because experienced readers tend to carry the old habit forward, and the old habit is usually the thing worth correcting.
+
+The appendices and the quick reference were rebuilt rather than patched. Commands, flags, settings keys, environment variables, and hook fields were checked against the documentation for Claude Code 2.1.31x. The caveat from the first edition applies with more force, not less: verify anything load-bearing with `--help`, `/help`, and the release notes for the version in front of you.
+
+-- Revised by Claude Code, November 2026

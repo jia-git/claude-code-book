@@ -1,279 +1,286 @@
 # Claude Code Quick Reference
 
+Current as of Claude Code 2.1.31x (November 2026). Full tables in Appendices A-C.
+
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `claude` | Start interactive REPL |
-| `claude "task"` | Start REPL with initial prompt |
-| `claude -p "task"` | Headless mode (non-interactive) |
-| `claude -c` | Continue most recent conversation |
-| `claude -c "task"` | Continue conversation with new prompt |
-| `claude -r <id>` | Resume session by ID |
-| `claude -r <name>` | Resume session by name |
+| `claude` | Start interactive session |
+| `claude "task"` | Start with an initial prompt |
+| `claude -p "task"` | Non-interactive run; print result and exit |
+| `claude -c` | Continue most recent conversation here |
+| `claude -r <id\|name>` | Resume a session (no argument opens the picker) |
+| `claude -w [name\|#pr]` | Start in a fresh git worktree |
+| `claude --bg "task"` | Start a background session and return |
+| `claude agents` | Agent view: dispatch and monitor background sessions |
+| `claude --cloud "task"` | Start a cloud session for this repository |
+| `claude doctor` | Install and settings diagnostics without a session |
+| `claude --safe-mode` | Start with all customizations off |
 
 ## Essential CLI Flags
 
 | Flag | Purpose |
 |------|---------|
-| `-p "prompt"` | Headless/non-interactive mode |
-| `-c` / `--continue` | Continue last session |
-| `-r` / `--resume <id>` | Resume specific session |
-| `--model <model>` | Override model |
-| `--output-format text\|json\|stream-json` | Output format (headless) |
-| `--max-turns <n>` | Limit agentic loop iterations |
-| `--budget-tokens <n>` | Set token spending limit |
-| `--system-prompt-file <path>` | Replace system prompt from file |
-| `--append-system-prompt-file <path>` | Add to system prompt from file |
-| `--allowedTools <tools>` | Comma-separated allowed tools |
-| `--disallowedTools <tools>` | Comma-separated denied tools |
-| `--dangerously-skip-permissions` | Skip all permission prompts (sandboxed envs only) |
-| `--permission-prompt-tool <mcp>` | Delegate permissions to MCP tool |
-| `--permission-mode <mode>` | Set permission mode |
-| `--fork-session` | Fork the resumed session |
-| `--session-name <name>` | Name the session |
-| `--verbose` | Enable verbose logging |
+| `-p "prompt"` | Non-interactive mode |
+| `--bare` | Skip hooks, skills, plugins, MCP, CLAUDE.md discovery (scripts) |
+| `--model <alias>` | `opus`, `sonnet`, `haiku`, `fable`, `opusplan`, or full ID |
+| `--effort <level>` | `low`, `medium`, `high`, `xhigh`, `max`, `ultracode` |
+| `--permission-mode <mode>` | `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
+| `--output-format text\|json\|stream-json` | Output format (print mode) |
+| `--json-schema <schema>` | Validated JSON in `structured_output` |
+| `--max-turns <n>` / `--max-budget-usd <n>` | Cap turns / estimated spend |
+| `--permission-prompts none` | Deny anything that would prompt (unattended runs) |
+| `--allowedTools` / `--disallowedTools` | Allow or deny rules for this run |
+| `--tools "Read,Bash"` | Restrict which built-in tools exist |
+| `--append-system-prompt[-file]` | Add to the system prompt |
+| `-n <name>` | Name the session |
+| `--fork-session` | Resume into a new session ID |
+| `--add-dir <path>` | Extra working directories |
 
 ## Slash Commands
 
 | Command | Purpose |
 |---------|---------|
-| `/help` | Show commands and shortcuts |
-| `/clear` | Clear conversation, start fresh |
-| `/compact` | Manually compact context |
-| `/context` | Show context window usage |
-| `/config` | Open/manage configuration |
-| `/init` | Initialize CLAUDE.md |
-| `/model` | Switch model mid-session |
-| `/mcp` | MCP server status and token costs |
-| `/permissions` | View/manage permission rules |
-| `/sandbox` | View sandbox status |
-| `/agents` | List available subagents |
-| `/doctor` | Run diagnostics |
-| `/rename` | Rename current session |
-| `/resume` | List and resume sessions |
-| `/teleport` | Transfer session to another surface |
-| `/desktop` | Open session in desktop app |
-| `/ide` | Open session in IDE extension |
+| `/plan` | Plan mode: read and propose, change nothing |
+| `/goal <condition>` | Keep working until the condition is verifiably met |
+| `/context` | What is filling the window |
+| `/compact [focus]` | Summarize to free context |
+| `/btw <question>` | Side question that stays out of history |
+| `/clear` | Fresh context (old session stays resumable) |
+| `/rewind` | Restore code/conversation, or summarize part of it |
+| `/branch` / `/fork` | Branch the conversation / copy it into a background session |
+| `/model` / `/effort` / `/fast` | Model, effort level, fast mode |
+| `/permissions` | Rules and recent auto mode denials |
+| `/fewer-permission-prompts` | Propose an allowlist from your transcripts |
+| `/sandbox` | Configure the shell sandbox |
+| `/hooks` | View configured hooks and sources |
+| `/mcp` | Server status, auth, reconnect |
+| `/memory` | CLAUDE.md files and auto memory |
+| `/code-review` / `/security-review` | Review the diff for bugs / vulnerabilities |
+| `/simplify` | Parallel cleanup pass on changed code |
+| `/batch <instruction>` | Large change split across worktree subagents |
+| `/loop [interval] <prompt>` | Repeat a prompt in this session |
+| `/schedule` | Cloud scheduled tasks |
+| `/autofix-pr` | Cloud session that fixes CI failures on your PR |
+| `/tasks` | Background work in this session |
+| `/usage` | Cost, plan limits, usage breakdown |
+| `/status` / `/doctor` | What loaded / setup checkup with fixes |
+| `/resume` / `/rename` | Session picker / rename |
 
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
 | `Shift+Tab` | Cycle permission modes |
-| `Esc Esc` (double) | Rewind to previous checkpoint |
-| `Ctrl+O` | Multi-line input mode |
-| `Ctrl+C` | Interrupt current operation |
-| `Ctrl+D` | End session |
+| `Esc` | Interrupt (work so far is kept) |
+| `Esc Esc` | Clear input, or on empty input open rewind |
+| `Ctrl+G` | Edit prompt or plan in your editor |
+| `Ctrl+O` | Transcript viewer |
+| `Ctrl+B` | Background a running command or agent |
+| `Ctrl+T` | Toggle task checklist |
+| `Ctrl+S` | Stash / restore prompt |
+| `Ctrl+Enter` | Send queued messages now |
+| `Option+P` / `Alt+P` | Switch model |
+| `Option+O` / `Alt+O` | Toggle fast mode |
+| `Ctrl+J` or `\` + `Enter` | Newline |
+| `!command` | Run a shell command; Claude sees the output |
+| `Ctrl+C` / `Ctrl+D` | Interrupt or clear / exit |
 
 ## Permission Modes
 
-| Mode | Behavior |
-|------|----------|
-| **Plan** | Read-only. No file edits, no write commands. |
-| **Default** | Asks permission for edits and commands. |
-| **Auto-accept edits** | File edits proceed; shell commands still prompt. |
-| **Full auto-accept** | Everything proceeds without prompting. |
-| **Bypass** | CLI flag only. Requires sandbox. |
+| Mode | Runs without asking |
+|------|---------------------|
+| **Manual** (`default`) | Reads only |
+| **Accept edits** | Reads, in-directory edits, common filesystem commands |
+| **Plan** | Reads; proposes instead of changing |
+| **Auto** | Everything, reviewed by a background classifier (default for interactive sessions) |
+| **Don't ask** | Pre-approved tools only; everything else denied |
+| **Bypass** | Everything. Isolated containers and VMs only |
 
-## Permission Hierarchy (highest to lowest)
+Deny rules apply in every mode. `-p` runs start in Manual unless you set a mode.
 
-1. **Managed** -- IT-deployed, cannot be overridden
-2. **CLI arguments** -- flags at invocation
-3. **Local** -- `.claude/settings.local.json` (gitignored)
-4. **Project** -- `.claude/settings.json` (version-controlled)
+## Settings Precedence (highest to lowest)
+
+1. **Managed** -- deployed by your organization; cannot be overridden
+2. **Command line** -- `--settings` for this session
+3. **Project local** -- `.claude/settings.local.json` (kept out of git)
+4. **Shared project** -- `.claude/settings.json` (committed)
 5. **User** -- `~/.claude/settings.json`
 
-Rule evaluation order: **Deny > Ask > Allow**, first match wins.
+List keys like `permissions.allow` merge across files. Rule evaluation: **Deny > Ask > Allow**.
 
 ## CLAUDE.md Best Practices
 
-- Keep under 500 lines -- every line costs context on every request
-- Put only what Claude cannot infer from code (build commands, style deviations, architectural decisions, environment quirks)
-- Do NOT include standard language conventions, framework docs, or obvious project structure
-- Use `@path` imports to pull in external reference files
-- Use the "Compact Instructions" section for rules that must survive auto-compaction
-- Update CLAUDE.md at the end of every productive session with lessons learned
-- Add targeted fixes for repeated errors (specific wrong behavior AND correct behavior)
-- Commit project-level CLAUDE.md to version control for team benefit
-- Keep personal preferences in user-level or local-scope files, not shared CLAUDE.md
+- Target under 200 lines; every line costs context on every request
+- Only what Claude cannot infer from code: build and test commands, deviations from convention, architectural decisions, environment quirks
+- Move path-specific guidance into `.claude/rules/*.md` with `paths:` frontmatter
+- Use `@path` imports for reference material
+- Project CLAUDE.md is re-read after compaction; rules given only in conversation are not
+- Add a "Compact instructions" section to steer what summaries keep
+- Personal notes go in `CLAUDE.local.md` or `~/.claude/CLAUDE.md`
+- Let auto memory collect the small lessons; prune it with `/memory`
+- Run `/doctor prompt-audit` periodically
 
 ## Context Cost Model
 
-**Costs every request:**
-- CLAUDE.md content (all imported files too)
-- MCP tool definitions (names, descriptions, JSON schemas)
-- Skill descriptions (short summaries)
+**Every request:**
+- CLAUDE.md and its imports, unscoped rules
+- Skill descriptions (not bodies)
+- MCP tool names (full schemas load on demand via tool search)
 
-**Isolated cost (subagents):**
-- Subagent work runs in its own context window
-- Only the returned summary costs main context
+**On demand:**
+- Path-scoped rules, nested CLAUDE.md, skill bodies, MCP tool schemas
 
-**Zero cost (hooks):**
-- Hooks execute outside the context window entirely
-- PreToolUse, PostToolUse, SessionStart -- all free
+**Isolated:**
+- Subagent and workflow work runs in separate windows; only the final report returns
+
+**Zero:**
+- Hooks run outside the context window, unless they return context
 
 ## Model Selection
 
-| Model | Use For | Cost |
-|-------|---------|------|
-| **Sonnet** | Default for most coding work. Fast, reliable, cost-effective. | Low |
-| **Opus** | Architecture decisions, complex refactors, ambiguous/high-stakes work. | High |
-| **Haiku** | Explore subagent, file search, quick reconnaissance. | Lowest |
-
-**Pattern:** Opus for orchestration/planning, Sonnet subagents for implementation, Haiku subagents for exploration.
+| Choice | Use for |
+|--------|---------|
+| **Opus** (default on most plans) | Most work; planning, architecture, ambiguous problems |
+| **Sonnet** | Fast, cheaper implementation and routine edits |
+| **Haiku** | High-volume, simple subtasks |
+| **opusplan** | Opus in plan mode, Sonnet for execution |
+| **Effort** | The bigger dial now: `low` for routine, `high`/`xhigh` for hard problems, `ultrathink` in a prompt for one hard turn |
+| **Advisor** | `/advisor` lets a stronger model weigh in at key moments |
 
 ## Top Prompt Patterns
 
 ### Verification Criteria (highest leverage)
-Tell Claude how to verify its own work. Tests, expected output, visual targets.
 ```
-Add auth to the API. Run `pytest tests/auth/` after. /api/protected should
-return 401 without token, 200 with valid token.
+Add auth to the API. Run the auth tests after. /api/protected should
+return 401 without a token and 200 with a valid one.
 ```
 
-### Backpressure Through Tooling
-Your linter, type checker, and test suite ARE part of your prompt. Strict tooling = better output. Pre-commit hooks create the tightest feedback loop.
-
-### Spec-First
-Ask Claude to write a spec/design doc before any code. Review the spec. Then implement. The spec survives compaction and session restarts.
-
-### Plan-Before-Execute
+### Verified Completion
 ```
-Before making changes, read relevant files and produce a plan. List every
-file you will modify, every new file, every behavioral change. Wait for
-my approval.
+/goal all tests in tests/auth pass and the lint step exits 0
 ```
+
+### Plan Before Execute
+Start in plan mode (`/plan`), review the plan, press `Ctrl+G` to edit it, then approve into auto or accept-edits mode.
 
 ### Exhaustive Questioning
 ```
-Before you start, ask me questions exhaustively about anything you are
-uncertain about. Do not proceed until you have asked every question.
+Before you start, ask me questions about anything you are uncertain
+about. Do not proceed until you have asked them.
 ```
 
 ### Constraint Explicitness
-State what cannot change, trade-off preferences, and flexibility boundaries.
 ```
-Do not modify the database schema. Performance > readability. You can add
-files in src/utils/ but not src/core/. No new dependencies.
-```
-
-### Self-Critique
-```
-Rate this implementation 1-10. What would you improve? What edge cases
-might break? What would a senior engineer object to?
+Do not modify the database schema. You can add files in src/utils/
+but not src/core/. No new dependencies.
 ```
 
-### Strawman Proposal
+### Adversarial Review
 ```
-Here is my rough approach: [description]. This might be wrong. Improve
-on it or suggest alternatives.
-```
-
-### Role Assignment
-```
-You are the orchestrator. Assign each subagent a clear, bounded task.
-Review output before integrating.
+Use a subagent to review this diff as a skeptical senior engineer.
+Report only problems you can demonstrate.
 ```
 
 ### Simplicity Directive
 ```
-Write the simplest implementation that satisfies requirements.
-No unnecessary abstractions.
+Write the simplest implementation that satisfies the requirement.
+No speculative abstraction.
 ```
 
 ## Four-Phase Workflow
 
-1. **Explore** -- Plan mode. Read codebase. Understand patterns.
-2. **Plan** -- Still plan mode. Outline approach. Review before implementing.
-3. **Implement** -- Switch to normal/auto-accept. Execute the reviewed plan.
-4. **Commit** -- Review diff. Commit frequently. Small commits = cheap insurance.
+1. **Explore** -- Plan mode. Read the code. Ask questions.
+2. **Plan** -- Still plan mode. Review and edit the plan.
+3. **Implement** -- Approve into auto or accept-edits mode. Use `/goal` for a verifiable finish line.
+4. **Commit** -- `/code-review`, then commit. Small commits are cheap insurance.
 
 ## MCP Configuration
 
-**.mcp.json** (project root, commit to VCS):
+**.mcp.json** (project root, commit to version control):
 ```json
 {
   "mcpServers": {
-    "server-name": {
+    "local-tool": {
+      "type": "stdio",
       "command": "node",
-      "args": ["path/to/server.js"],
-      "env": { "API_KEY": "${ENV_VAR}" }
+      "args": ["tools/server.js"],
+      "env": { "API_KEY": "${TOOL_API_KEY}" }
+    },
+    "tracker": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp"
     }
   }
 }
 ```
 
-- Use `/mcp` to check status and per-server token costs
-- MCP keeps credentials out of context (server-side, not in conversation)
-- Background subagents CANNOT use MCP tools
-- Hook pattern for MCP tools: `mcp__<server>__<tool>`
+- `/mcp` for status, auth, and `reconnect all`; `claude mcp list` from the shell
+- Tool search loads MCP schemas on demand; large results are the real cost
+- Background subagents keep MCP access
+- Rule pattern: `mcp__<server>__<tool>`, `mcp__<server>__*` for a whole server
 
-## Subagent Types
+## Subagents
 
-| Type | Model | Tools | Use Case |
-|------|-------|-------|----------|
-| **Explore** | Haiku | Read-only | Navigate unfamiliar code |
-| **Plan** | Same as parent | Read-only | Complex planning tasks |
-| **General** | Configurable | All tools | Implementation work |
-| **Bash** | Configurable | Shell only | Command sequences |
-| **Custom** | Configurable | Configurable | Defined in `.claude/agents/` |
+| Type | Notes |
+|------|-------|
+| **Explore** | Read-only search; runs on a capable model, so not automatically cheap |
+| **Plan** | Read-only research for plan mode |
+| **general-purpose** | All tools; implementation work |
+| **Fork** | Inherits the full conversation (`/subtask`) |
+| **Custom** | `.claude/agents/*.md` or `--agents` JSON |
 
-Key constraint: subagents cannot spawn other subagents (two-level hierarchy only).
+Subagents run in the background by default, up to 20 at a time, nested up to 3 levels. For larger fan-outs, use a dynamic workflow.
 
 ## Common Failure Modes and Quick Fixes
 
 | Problem | Fix |
 |---------|-----|
-| Claude forgets instructions mid-session | Context exhaustion. Start fresh session with good CLAUDE.md. Use `/compact`. |
-| Bash env vars not persisting | Chain commands: `NODE_ENV=prod npm test`. Each bash call is a fresh shell. |
-| MCP tools suddenly stop working | Run `/mcp`. Server disconnected silently. Reconnect or restart session. |
-| Checkpoint restore misses changes | Checkpoints only track Write/Edit tools, not bash. Use `git checkout .` instead. |
-| Claude repeats same error across sessions | Add targeted fix to CLAUDE.md with wrong AND correct behavior. |
-| Over-complex solutions | Add simplicity directive to prompt and CLAUDE.md. Provide reference code. |
-| Subagents flood main context | Instruct subagents to return concise summaries or write results to files. |
-| Session lost after crash | `claude -c` to continue, or `claude -r <id>` to resume by ID. |
-| Claude goes down wrong path | Commit first. Then either correct (if approach is right, details wrong) or `git checkout .` and restart fresh. |
-| Stop hook infinite loop | Add iteration limits to stop hooks. Test with intentionally failing conditions. |
-
-## Slot Machine Recovery
-
-1. Commit current state
-2. Let Claude run for 20-30 minutes (time-boxed)
-3. Binary decision: accept result or `git revert` and retry with better prompt
-4. No correction spiral -- clean restart beats patching a bad approach
+| Forgets instructions mid-session | Put the rule in CLAUDE.md or a rule file; lower the auto-compact window; start fresh per task |
+| Shell variables do not persist | Same-line assignment, or `CLAUDE_ENV_FILE` from a SessionStart hook |
+| MCP tools stop working | `/mcp reconnect all`; `claude mcp list` |
+| Rewind misses changes | Checkpoints skip shell-command edits and background subagent edits; use git |
+| Same error across sessions | Targeted CLAUDE.md line with wrong and right behavior |
+| Setting has no effect | `/status` → Setting sources; `claude doctor` |
+| Something broke after a config change | `claude --safe-mode` |
+| Policy hook does not block | Exit 2, not exit 1; add `onFailure: "block"` |
+| Auto mode blocks routine work | `/auto-mode-setup`; `/permissions` → Recently denied |
+| Session lost | `claude -c`, or `claude -r` and search |
+| Stop hook loops forever | Check `stop_hook_active`; or use `/goal` instead |
 
 ## Key Environment Variables
 
 | Variable | Purpose |
 |----------|---------|
 | `ANTHROPIC_API_KEY` | API key |
-| `ANTHROPIC_MODEL` | Override default model |
-| `ANTHROPIC_SMALL_FAST_MODEL` | Model for Haiku-level tasks |
-| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | Compaction threshold (default 95) |
-| `CLAUDE_CODE_USE_BEDROCK` | Enable Bedrock (`1`) |
-| `CLAUDE_CODE_USE_VERTEX` | Enable Vertex AI (`1`) |
-| `ENABLE_TOOL_SEARCH` | MCP tool search/deferred loading |
-| `CLAUDE_CODE_ENABLE_AGENT_TEAMS` | Enable experimental teams |
-| `CLAUDE_CODE_THINKING_MODE` | `enabled`, `disabled`, `budget` |
-| `CLAUDE_CODE_MAX_TOKENS` | Max tokens per response |
-| `CLAUDE_CODE_BUDGET_TOKENS` | Token budget (headless) |
-| `CLAUDE_CODE_MAX_TURNS` | Max turns (headless) |
+| `ANTHROPIC_MODEL` | Session model |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` / `_SONNET_` / `_HAIKU_` | Pin what each alias resolves to |
+| `CLAUDE_CODE_EFFORT_LEVEL` | Effort level |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | Auto-compact window (tokens) |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | Model for subagents |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` enables agent teams |
+| `CLAUDE_CODE_ENABLE_TODO_TOOLS` | `1` enables task tools on every model |
+| `MAX_THINKING_TOKENS` | Fixed thinking budget (older models only) |
+| `ENABLE_TOOL_SEARCH` | MCP deferred loading |
+| `CLAUDE_CODE_SIMPLE` | Same as `--bare` |
 
 ## Headless / CI Pattern
 
 ```bash
-# Basic headless
-claude -p "task description" --output-format json
+# Scripted run with a hard boundary
+claude --bare -p "Fix the failing tests" \
+  --allowedTools "Read,Edit,Bash(npm test *)" \
+  --permission-mode dontAsk \
+  --max-turns 30 --max-budget-usd 5 \
+  --output-format json
 
 # Pipe input
 git diff HEAD~1 | claude -p "Review for security issues" --output-format json
 
-# CI with devcontainer + network isolation
-claude -p "fix failing tests" --dangerously-skip-permissions
-
-# Reproducible prompts
-claude -p "$(cat task.txt)" --system-prompt-file ci-prompt.md --output-format json
+# Structured output
+claude -p "List the public API functions in src/" \
+  --json-schema '{"type":"object","properties":{"functions":{"type":"array","items":{"type":"string"}}}}'
 ```
 
 ## Hook Configuration (settings.json)
@@ -281,43 +288,48 @@ claude -p "$(cat task.txt)" --system-prompt-file ci-prompt.md --output-format js
 ```json
 {
   "hooks": {
-    "PreToolUse": [{
-      "matcher": "Bash(rm *)",
-      "handler": { "type": "command", "command": "exit 1" }
-    }],
-    "SessionStart": [{
-      "matcher": "*",
-      "handler": { "type": "command", "command": "echo 'Session started'" }
-    }]
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/check-bash.sh",
+            "if": "Bash(rm *)",
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
   }
 }
 ```
 
-Hook decisions: `allow` (proceed), `deny` (block), `undefined` (fall through).
-Hooks run with full user permissions. Zero context cost.
+Exit 2 blocks (stderr goes to Claude). Exit 1 does not block. Handler types: `command`, `http`, `mcp_tool`, `prompt`, `agent`. Hooks cost no context unless they return some.
 
 ## Permission Rule Syntax
 
 ```json
 {
   "permissions": {
-    "deny": ["Bash(rm *)", "Write(*.env)"],
+    "deny": ["Read(./.env*)", "Edit(./secrets/**)", "Bash(rm -rf *)"],
     "ask": ["Bash(git push *)"],
-    "allow": ["Bash(npm test)", "Bash(git status)"]
+    "allow": ["Bash(npm run test *)", "Bash(git diff *)"]
   }
 }
 ```
 
-Patterns: `Tool`, `Tool(specifier)`, `mcp__server__tool`. Glob wildcards supported.
+Patterns: `Tool`, `Tool(specifier)`, `mcp__server__tool`. Bash prefix rules need a space before `*`.
 
 ## Git Worktrees for Parallel Work
 
 ```bash
-git worktree add ../feature-auth feature/auth
-git worktree add ../feature-payments feature/payments
-# Run independent Claude Code sessions in each directory
+claude -w feature-auth        # new worktree + session
+claude -w "#482"              # worktree branched from a pull request
 ```
+
+`.worktreeinclude` lists gitignored files to copy in; `worktree.symlinkDirectories` shares heavy directories.
 
 ## One-Third Reality
 
-~33% of tasks succeed on first attempt. This is normal. The correction cycle is fast. Invest in verification infrastructure (tests, types, linting) to improve the rate.
+Plenty of tasks still need a second attempt. That is normal. The correction cycle is fast, and every investment in verification -- tests, types, linting, a `/goal` condition -- raises the first-pass rate.

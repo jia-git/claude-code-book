@@ -40,9 +40,11 @@ Think of it as RAM for the conversation. Every file Claude reads, every command 
 
 This is not a theoretical concern. It happens in every long session. Auto-compaction kicks in when the window is nearly full, summarizing older content to make room -- but the summarization is lossy. Chapter 3 covers the compaction mechanics and how to survive them.
 
+Here is the counterintuitive part. The current generation of models ships with a million-token window by default -- five times the old ceiling. You would expect the constraint to have disappeared. It did not. It moved. A bigger window means you hit the wall later, but every token in that window is still re-sent on every request, still competes for the model's attention, and still counts against your plan limits. A million tokens of stale exploration is not a resource. It is a very large haystack. The developers who treated the old 200K window as a hard budget kept the habit, and they are the ones whose sessions still feel sharp at hour three.
+
 The practical consequence is that every interaction has a cost measured in context space, and you need to think about that cost the same way you think about compute budgets or memory allocation. Reading a 2,000-line file is expensive. Dumping verbose test output into the conversation is expensive. Having Claude search for something it could find with a targeted glob is expensive.
 
-The developers who get the most from Claude Code are the ones who treat context like a scarce resource. They use subagents to isolate verbose operations (Chapter 4). They keep CLAUDE.md files concise -- under 500 lines (Chapter 3). They compact proactively instead of waiting for auto-compaction to butcher their context at the worst possible moment.
+The developers who get the most from Claude Code are the ones who treat context like a scarce resource. They use subagents to isolate verbose operations (Chapter 4). They keep CLAUDE.md files concise -- under 200 lines (Chapter 3). They ask throwaway questions with `/btw` so the answer never enters the conversation history. They compact proactively instead of waiting for auto-compaction to butcher their context at the worst possible moment.
 
 ## The Four-Phase Workflow
 
@@ -50,15 +52,17 @@ If you have been typing implementation requests directly into Claude Code, you h
 
 The workflow that consistently produces the best results has four phases: explore, plan, implement, commit. Skipping exploration is the single most common mistake, and it leads to Claude confidently solving the wrong problem with technically correct code.
 
-**Explore.** Start in plan mode. Let Claude read your codebase. Point it at relevant directories. Ask it to understand the existing patterns, the conventions, the architecture. This is cheap -- plan mode restricts Claude to read-only operations, so it cannot accidentally modify anything while it is figuring out the lay of the land.
+**Explore.** Start in plan mode (`/plan`, or Shift+Tab until the status bar says so). Let Claude read your codebase. Point it at relevant directories. Ask it to understand the existing patterns, the conventions, the architecture. This is cheap -- plan mode keeps Claude researching and proposing rather than editing, so it is figuring out the lay of the land instead of rearranging it.
 
-**Plan.** Still in plan mode. Ask Claude to outline its approach. Review the plan. Push back on parts that do not match your mental model. This is where misunderstandings surface, and fixing a misunderstanding in a plan costs nothing. Fixing it in implementation costs you a revert and a burned context window.
+**Plan.** Still in plan mode. Ask Claude to outline its approach. Review the plan. Press Ctrl+G to open it in your editor and change it directly rather than arguing with it in chat. Push back on parts that do not match your mental model. This is where misunderstandings surface, and fixing a misunderstanding in a plan costs nothing. Fixing it in implementation costs you a revert and a burned context window. The plan is also written to a file, and Claude Code re-injects that file after every compaction -- so on a long task the plan survives where the conversation that produced it may not.
 
-**Implement.** Switch to normal mode. Claude now has the context from exploration and a reviewed plan. Implementation quality is dramatically higher because Claude is working from understanding rather than assumption. Let it run.
+**Implement.** Approve the plan, and Claude Code offers to switch you into auto mode, accept-edits mode, or manual mode for execution. Claude now has the context from exploration and a reviewed plan. Implementation quality is dramatically higher because Claude is working from understanding rather than assumption. Let it run.
 
 **Commit.** Claude will offer to commit when implementation is complete. Review the diff. If you have been doing this well, the diff should be unsurprising. Commit frequently. Small commits are cheap insurance. The checkpoint-and-rollback strategy (discussed later in this chapter) depends on having clean commit boundaries to revert to.
 
 This four-phase workflow is not about being cautious. It is about being efficient. Exploration and planning are cheap. Implementation and debugging are expensive. Front-loading cheap work to reduce expensive work is not caution. It is engineering.
+
+The corollary: if you could describe the diff in one sentence, skip the plan. Renaming a variable does not need a design review. Plan mode earns its overhead when you are uncertain about the approach, the change spans multiple files, or the code is unfamiliar.
 
 ### First-Stop Workflow Planning
 
@@ -72,19 +76,23 @@ Most people think of permission modes as a safety dial. Crank it up for danger, 
 
 Permission modes shape how work happens. They are workflow selectors, not just guardrails.
 
-**Plan mode** restricts Claude to read-only operations. Use it for exploration and research. You are not being cautious; you are being intentional about which phase of the workflow you are in.
+**Plan mode** keeps Claude researching and proposing instead of editing. Use it for exploration and research. You are not being cautious; you are being intentional about which phase of the workflow you are in.
 
-**Default mode** asks permission for each write operation. Use it for surgical changes where you want to approve every edit.
+**Manual mode** (the config value is still `default`) asks before anything beyond a read. Use it for surgical changes where you want to approve every edit and command.
 
-**Auto-accept edits mode** lets Claude write files without asking but still prompts for shell commands. This is the sweet spot for implementation phases where you trust the plan but want to supervise system-level operations.
+**Accept-edits mode** lets Claude write files and run common filesystem commands inside the working directory without asking, but still prompts for other shell commands -- and, notably, still prompts before writing files that can execute code. This is the sweet spot when you trust the plan but want to supervise system-level operations.
 
-**Full auto-accept mode** lets Claude run without interruption. Use it when you have strong verification in place -- a good test suite, a linter with teeth, pre-commit hooks that enforce standards. The permission model (Chapter 2) governs the full scope of what Claude Code can do without asking.
+**Auto mode** is the one that changed everything, and it is now where an interactive terminal or editor session starts by default. Instead of you approving each action, a separate classifier model reviews it in the background. Routine work runs without interruption; anything that escalates beyond what you asked for, touches infrastructure the classifier does not recognize, or looks like it was steered by hostile content in a file or web page gets blocked. It is the middle ground that used to not exist: between clicking "approve" two hundred times a day and turning every check off.
 
-Cycling between these modes mid-session with Shift+Tab is not a sign of indecision. It is how experienced users move through the explore-plan-implement-commit workflow without starting new sessions. You explore in plan mode, review the plan, toggle to auto-accept, and let Claude execute.
+**Don't-ask mode** is for locked-down scripts: anything that would prompt is simply denied. **Bypass mode** turns the checks off entirely and belongs only in disposable containers. The permission model (Chapter 2) governs the full scope of what each mode allows.
+
+Cycling between these modes mid-session with Shift+Tab is not a sign of indecision. It is how experienced users move through the explore-plan-implement-commit workflow without starting new sessions. You explore in plan mode, review the plan, approve it into auto mode, and let Claude execute.
 
 ### Autonomous Loops and the 80% Handoff
 
-The product development team at Anthropic took the auto-accept workflow further. Their engineers enable full auto-accept mode and set up autonomous loops where Claude writes code, runs the test suite, reads the failures, and iterates continuously. They hand Claude abstract problems they are not familiar with, let it work autonomously, and then review the result when it reaches roughly eighty percent completion. The last twenty percent -- the judgment calls, the design refinements, the edge cases that require domain knowledge -- they finish themselves.
+The product development team at Anthropic took the hands-off workflow further. Their engineers set up autonomous loops where Claude writes code, runs the test suite, reads the failures, and iterates continuously. They hand Claude abstract problems they are not familiar with, let it work autonomously, and then review the result when it reaches roughly eighty percent completion. The last twenty percent -- the judgment calls, the design refinements, the edge cases that require domain knowledge -- they finish themselves.
+
+What used to take a hand-rolled script is now two built-ins. Auto mode removes the per-action prompts. The `/goal` command removes the per-turn prompts: you state a completion condition -- "all tests in the auth package pass and lint is clean" -- and a separate evaluator model checks it after every turn, sending Claude back to work until the condition holds or it judges the goal impossible. Chapter 8 covers how to write conditions that hold up across many turns.
 
 This workflow depends on two things: starting from a clean git state so you can revert the entire run if it goes sideways, and committing as Claude goes so you have intermediate checkpoints. The security engineering team at Anthropic distilled this into a single directive they give Claude at the start of autonomous sessions: "commit your work as you go." Instead of asking targeted questions for code snippets, they let Claude work autonomously with periodic check-ins, and the incremental commits create a trail they can review, cherry-pick, or revert as needed.
 
@@ -153,27 +161,27 @@ Knowing which category you are looking at is itself a skill. The developers who 
 
 ### Build Now vs. Wait For
 
-Some capabilities are coming but are not quite production-ready in current tooling. The pragmatic approach is to know the difference:
+The first edition of this book had a "wait for it" list: native CI auto-fix, issue-to-pull-request automation, visual dashboards for parallel agents. Every item on it shipped within months. That is the real lesson of this section -- the line between "hybrid" and "native" moves fast enough that a workaround you build today is likely to be a built-in next quarter.
 
-**Build with Claude Code right now:** Repository-wide refactors, API scaffolding, test generation, database migrations, deployment configurations, documentation, component architecture, and any task where verification is automated.
+**Build with Claude Code right now:** Repository-wide refactors, API scaffolding, test generation, database migrations, deployment configurations, documentation, component architecture, and any task where verification is automated. Add to that list what used to be gaps: browser-based end-to-end verification (Claude drives your real, logged-in browser through the browser extension, or launches and pokes your app with `/run` and `/verify`), pull requests that fix their own CI failures and review comments (`/autofix-pr` hands a branch to a cloud session that watches it), automated review on every pull request, and dispatching and monitoring a dozen parallel sessions from one screen (`claude agents`, covered in Chapter 4).
 
-**Use a hybrid toolchain for now:** Inline code suggestions while typing (complement Claude Code with an IDE-integrated autocomplete tool), browser-based end-to-end testing (Claude Code writes the test scripts, you run and validate them), and complex multi-agent coordination that needs more mature UIs.
+**Use a hybrid toolchain for now:** Inline code suggestions while typing (complement Claude Code with an editor-integrated autocomplete tool), GUI-only workflows on platforms where computer use is not available, and anything where the verification step requires a human's eyes on production data.
 
-**Wait for improvements:** Native CI auto-fix pipelines (the integration is coming), automated issue-to-pull-request bots (the workflow exists in pieces but is not fully polished), and richer multi-agent coordination UIs that let you manage parallel agent work visually.
+**Treat as experimental:** Agent teams (still behind an environment variable), agent view and cloud scheduled tasks (research previews), and anything labeled preview in the changelog. They work, and some are excellent, but their interfaces and limits are still moving.
 
-The developers who ship fastest are the ones who use Claude Code aggressively for what it handles well today, complement it with other tools for current gaps, and avoid building fragile workarounds for capabilities that will be native features within months.
+The developers who ship fastest are the ones who use Claude Code aggressively for what it handles well today, complement it with other tools for current gaps, and check the release notes (`/release-notes`) before building a fragile workaround for something that may already be a native feature.
 
 ## Task Classification: Async vs. Sync
 
 Not every task deserves the same level of attention. Experienced teams develop an intuition for which tasks to run asynchronously -- fire and forget -- and which require synchronous supervision.
 
-**Async candidates.** Test generation for existing code. Documentation updates. Boilerplate scaffolding. Migration scripts with clear patterns. Dependency updates. Code formatting and lint fixes. These tasks have unambiguous success criteria and low risk of subtle errors. Let Claude run in auto-accept mode, check the result when it is done.
+**Async candidates.** Test generation for existing code. Documentation updates. Boilerplate scaffolding. Migration scripts with clear patterns. Dependency updates. Code formatting and lint fixes. These tasks have unambiguous success criteria and low risk of subtle errors. Dispatch them as background sessions in auto mode and check the result when they are done -- `claude --bg "..."` returns your terminal immediately, and agent view (Chapter 4) tells you which ones finished, failed, or need you.
 
 **Sync candidates.** Core business logic. Security-sensitive changes. Architectural decisions. Performance optimizations. Anything where the failure mode is silent -- code that runs but produces wrong results. These tasks need you watching, reacting, and course-correcting in real time.
 
 ### The Product Team's Classification Rubric
 
-The product development team at Anthropic formalized this intuition into a rubric. Tasks on the product's periphery -- a new settings panel, a prototype feature, a peripheral UI component -- go into auto-accept mode. Abstract problems the developer is unfamiliar with are also good candidates, because Claude's exploratory attempts in autonomous mode often surface the right approach faster than human speculation.
+The product development team at Anthropic formalized this intuition into a rubric. Tasks on the product's periphery -- a new settings panel, a prototype feature, a peripheral UI component -- run unattended. Abstract problems the developer is unfamiliar with are also good candidates, because Claude's exploratory attempts in autonomous mode often surface the right approach faster than human speculation.
 
 Tasks touching core business logic, critical user-facing features, or anything where style guide compliance and architectural consistency matter? Synchronous supervision. The developer watches, interrupts when needed, and keeps Claude aligned with the broader design intent.
 
@@ -189,17 +197,17 @@ The one-third success rate is not a quality metric. It is a feature of the workf
 
 ## Session Strategy
 
-Sessions are not persistent environments. Each new session starts with a fresh context window. Everything Claude learned about your codebase, your preferences, your project's quirks -- gone.
+Sessions are not persistent environments. Each new session starts with a fresh context window. The conversation, the files Claude read, the dead ends it explored -- gone.
 
-This is not a bug. It is a design constraint that shapes how you should work.
+Not quite everything, anymore. Auto memory (Chapter 3) means Claude now keeps its own notes per repository -- your corrections, your preferences, the build quirk it tripped over last Tuesday -- and loads the index of those notes at the start of every session. But notes are not context. A session still begins without the working state of the last one, and that is a design constraint that shapes how you should work.
 
-**Continue.** Resume the last session in the current directory. Use this when you were interrupted and need to pick up where you left off. The full conversation history is restored into the context window.
+**Continue.** Resume the last session in the current directory (`claude -c`). Use this when you were interrupted and need to pick up where you left off. The full conversation history is restored into the context window.
 
-**Resume by ID or name.** Useful for long-running projects with multiple parallel workstreams. Name your sessions meaningfully so you can find them later.
+**Resume by ID or name.** Useful for long-running projects with multiple parallel workstreams. Name sessions with `-n` at launch or `/rename` mid-session, then `claude -r auth-refactor` gets you back. Paste a pull request URL into `/resume` and it finds the session that created that PR.
 
-**Fork.** Create a new session that starts with the full history of an existing one but diverges from that point. The original session is preserved. Use this when you want to explore an alternative approach without losing your current progress.
+**Branch.** `/branch` splits the conversation at this point and switches you into the copy; the original stays intact and reachable from `/resume`. Use it when you want to try an alternative approach without losing your current progress. Its sibling, `/fork`, copies the conversation into a new *background* session that works on something else while you keep going here.
 
-**Fresh session.** Start clean. This is often the right choice when your previous session's context is mostly spent on exploration that is no longer relevant. Persistent knowledge goes in CLAUDE.md (Chapter 3) and in your project's task system, not in session history.
+**Fresh session.** Start clean. This is often the right choice when your previous session's context is mostly spent on exploration that is no longer relevant. Persistent knowledge goes in CLAUDE.md (Chapter 3) and in your project's task system, not in session history. And if you `/clear` and immediately regret it, the rewind menu offers the pre-clear conversation as its top entry for as long as the process stays open.
 
 The key insight is that session management is context management. A session that has been running for hours is a session with a full context window, which means degraded performance. Starting fresh with a good CLAUDE.md file is often faster than continuing a bloated session, because Claude gets your critical instructions at full fidelity instead of through the haze of auto-compacted summaries.
 
@@ -211,7 +219,7 @@ Flip the expectation. Plan for iteration.
 
 The first pass is a draft. Review it. Tell Claude what is wrong. Tell Claude what is right. Give it the failing test output. Show it the linter errors. The agentic loop is designed for this. Each correction sharpens Claude's understanding of what you actually want, and because the conversation history is in the context window, Claude does not repeat its mistakes within a session.
 
-Multi-session iteration works the same way, just with CLAUDE.md as the persistence layer instead of conversation history. After a productive session, ask Claude to summarize what it learned and suggest updates to your CLAUDE.md file. The next session starts smarter. Over five or ten sessions, the CLAUDE.md file accumulates enough project-specific knowledge that first-pass quality improves dramatically.
+Multi-session iteration works the same way, just with CLAUDE.md and auto memory as the persistence layers instead of conversation history. Auto memory captures the small stuff on its own. The rules you want enforced for the whole team still need a human decision: after a productive session, ask Claude to summarize what it learned and suggest updates to your CLAUDE.md file. The next session starts smarter. Over five or ten sessions, the CLAUDE.md file accumulates enough project-specific knowledge that first-pass quality improves dramatically.
 
 Self-critique prompting (Chapter 8) accelerates this loop further -- asking Claude to evaluate its own output surfaces issues the initial generation missed.
 
@@ -250,7 +258,8 @@ This connects to a broader principle: Claude Code responds to constraints better
 - Claude Code is an agentic loop (read-plan-act-verify) built on a pattern so simple it fits in 350 lines -- but wrapped in production-grade safety, permissions, and context management that makes the difference.
 - The context window is the single most important constraint -- every file read, command output, and message consumes finite space, and performance degrades sharply when it fills.
 - The explore-plan-implement-commit workflow front-loads cheap work (exploration, planning) to reduce expensive work (debugging, reverting).
-- Permission modes are workflow selectors: use plan mode for exploration, auto-accept for trusted implementation, and default for surgical changes. Shift+Tab to cycle between them mid-session.
+- Permission modes are workflow selectors: plan mode for exploration, auto mode (now the interactive default) for trusted implementation, manual for surgical changes. Shift+Tab cycles between them mid-session.
+- A million-token window moves the context wall; it does not remove it. Treat context as scarce anyway.
 - Research shows developers can fully delegate only 0-20% of tasks; the real value is iterative collaboration, not fire-and-forget automation.
 - Assess Claude Code fit at the component level: frontend scaffolding and test generation are immediate wins; real-time systems and security-critical logic need human partnership.
 - Try one-shot first, then collaborate -- the one-third immediate success rate is a feature, not a bug, and failed first attempts produce the information you need for targeted guidance.

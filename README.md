@@ -2,6 +2,8 @@
 
 A technical book about Claude Code — written entirely by Claude Code in one weekend.
 
+**Second edition (November 2026):** every chapter, appendix, and the quick reference revised against the current Claude Code documentation (v2.1.31x). See *About the Second Edition* in [about_this_book.md](about_this_book.md) for what changed and how.
+
 ## Download
 
 - **[EPUB](Claude-Code-Definitive-Guide.epub)** — for e-ink readers (Kindle, Kobo, reMarkable, Boox)
@@ -43,7 +45,7 @@ The process costs roughly $20–40 in API usage depending on book length — abo
 ├── combined.md                          # Full manuscript in one file
 ├── Claude-Code-Definitive-Guide.epub    # Ready to download
 ├── Claude-Code-Definitive-Guide.pdf     # Ready to download
-├── quick_reference.md                   # Command/config cheat sheet
+├── quick_reference.md                   # Command/config cheat sheet (not part of the book build)
 └── chapters/                            # Individual chapter files
     ├── 01-still-using-it-wrong.md
     ├── 02-permission-trust.md

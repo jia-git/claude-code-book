@@ -1,574 +1,546 @@
 # Appendix B: Configuration Reference
 
-## Settings.json Keys by Scope
+Current as of Claude Code 2.1.31x (late 2026). Settings files are strict JSON: no comments, no trailing commas. Run `/status` to see which files loaded and `claude doctor` to see which entries were rejected.
 
-### JSON Schema for Settings
+## Settings Files and Precedence
 
-Add the `$schema` line to any `settings.json` for autocomplete and inline validation in editors that support JSON schema:
+| Priority | Scope | Location | Shared |
+|----------|-------|----------|--------|
+| 1 (highest) | Managed | `managed-settings.json` in a system directory, MDM/OS policy, or server-managed settings from the admin console | Organization-wide |
+| 2 | Command line | `--settings <file-or-json>` | This session only |
+| 3 | Project local | `.claude/settings.local.json` | No (kept out of git automatically) |
+| 4 | Shared project | `.claude/settings.json` | Yes (commit it) |
+| 5 (lowest) | User | `~/.claude/settings.json` | No |
+
+**Rules worth memorizing:**
+
+- A higher scope overrides the same key below it, but **list keys merge**: `permissions.allow` from three files is one combined list. Exceptions: `fallbackModel` and `modelPicker` take the whole value from one source; a managed `availableModels` is applied as-is.
+- Environment variables are not a level in the stack. Each variable/key pair has its own rule (`ANTHROPIC_MODEL` beats the `model` key from any file).
+- `permissions.defaultMode` set to `auto` or `bypassPermissions` is ignored in project and local files. Set it in user or managed settings.
+- `permissions.allow`, `additionalDirectories`, `extraKnownMarketplaces`, and most `env` values from a committed file wait until the folder is trusted. `deny` and `ask` rules apply immediately.
+- A few restrictive values are honored from any scope even against managed settings (for example `permissions.blockReadsOutsideWorkingDirectories: true`, a lower `maxEffortLevel`).
+- Most edits apply to a running session without a restart. `model` and `effortLevel` are read once at startup; use `/model` and `/effort` mid-session.
+- `~/.claude.json` is Claude Code's own state file: account, MCP servers at user and local scope, per-project trust, and global config keys written by `/config`. You rarely edit it by hand.
+
+### JSON Schema
 
 ```json
 {
-  "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "permissions": { ... },
-  "env": { ... }
+  "$schema": "https://json.schemastore.org/claude-code-settings.json"
 }
 ```
 
-### Permission Rules
+Gives autocomplete and validation in editors that support JSON schema. The schema can lag new releases.
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `permissions.allow` | `string[]` | Tools auto-approved without prompting |
-| `permissions.ask` | `string[]` | Tools requiring user confirmation |
-| `permissions.deny` | `string[]` | Tools always blocked |
+---
 
-Rule syntax: `Tool` or `Tool(specifier)` with glob pattern support. Evaluation order: **Deny > Ask > Allow**, first match wins across all scopes.
+## Settings Keys (Selected)
 
-Examples:
-- `Bash(npm test)` -- specific bash command
-- `Write(*.env)` -- file pattern
-- `mcp__server__tool` -- MCP tool
-- `Bash(git *)` -- wildcard command
+Keys marked **[M]** are honored only in managed settings.
 
-### Environment Variables (Settings)
+### Permissions
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `env` | `object` | Key-value pairs injected into Claude's environment |
+| Key | Description |
+|-----|-------------|
+| `permissions.allow` / `.ask` / `.deny` | Rule lists. Deny beats ask beats allow |
+| `permissions.defaultMode` | Starting mode: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
+| `permissions.additionalDirectories` | Extra working directories (file access only; most `.claude/` config is not discovered there) |
+| `permissions.blockReadsOutsideWorkingDirectories` | Deny reads outside the working directories |
+| `permissions.disableBypassPermissionsMode` | Set to `"disable"` to remove bypass mode |
+| `disableAutoMode` | Remove auto mode from the mode cycle |
+| `autoMode` | Classifier configuration: `environment` (trusted infrastructure), `allow`, hard-deny entries, `classifyAllShell` |
+| `useAutoModeDuringPlan` | Let plan mode use the auto mode classifier for commands |
+| `allowManagedPermissionRulesOnly` **[M]** | Ignore allow/ask/deny rules from user and project files |
 
-### Hook Configuration
+### Permission Rule Syntax
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `hooks` | `object` | Event-to-handler mappings (see Hook Schema below) |
+| Rule | Matches |
+|------|---------|
+| `Bash` | Every shell command |
+| `Bash(npm run test *)` | Commands starting with `npm run test ` (space before `*` matters) |
+| `Bash(git diff *)` | Any `git diff` invocation |
+| `Read(./.env*)` | Reads of `.env` files relative to the working directory |
+| `Edit(./migrations/**)` | Edits anywhere under `migrations/` (covers all file-editing tools) |
+| `Read(~/secrets/**)` | Paths under the home directory |
+| `WebFetch(domain:example.com)` | Fetches from one domain |
+| `Agent(Explore)` | One named subagent |
+| `Agent(model:opus)` | Subagent calls that request a model (deny/ask rules only) |
+| `Skill(deploy *)` | A skill and its arguments |
+| `mcp__tracker__*` | All tools on one MCP server (exact server name) |
+| `Bash(dangerouslyDisableSandbox:true)` | Parameter match (deny/ask rules) |
 
-### Model Settings
+Paths: `./` relative to the working directory, `~/` home, `//` filesystem root, a leading `/` anchors at the working directory. Bash rules match the command as written; pair them with the sandbox for anything security-critical.
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `model` | `string` | Default model identifier |
-| `availableModels` | `string[]` | Models available for selection |
+### Model and Effort
 
-### Authentication and Credentials
+| Key | Description |
+|-----|-------------|
+| `model` | Model new sessions start with (alias or full ID) |
+| `fallbackModel` | Ordered list of backup models |
+| `availableModels` | Models users may select; `deniedModels` **[M]** blocks specific ones |
+| `effortLevel` | Default effort: `low`, `medium`, `high`, `xhigh` |
+| `maxEffortLevel` | Effort cap; the lowest cap across scopes wins |
+| `modelSettings` | Per-model `effortLevel`, `maxEffortLevel`, `autoCompactWindow` |
+| `advisorModel` | Model for the advisor tool (unset = off) |
+| `fastMode` / `fastModePerSessionOptIn` | Fast mode on by default / require `/fast` each session |
+| `alwaysThinkingEnabled` | `false` turns extended thinking off where the model allows it |
+| `modelOverrides` | Map model IDs to provider-specific IDs |
+| `modelPricing` **[M]** | Report costs at contracted rates (`multiplier`, `overrides`) |
+| `language` | Response language |
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `apiKeyHelper` | `string` | Custom script (executed via `/bin/sh`) to generate an auth value. Value is sent as `X-Api-Key` and `Authorization: Bearer` headers for model requests |
-| `awsAuthRefresh` | `string` | Custom script that modifies the `.aws` directory for credential refresh |
-| `awsCredentialExport` | `string` | Custom script that outputs JSON with AWS credentials |
-| `forceLoginMethod` | `string` | Restrict login to `claudeai` (Claude.ai accounts) or `console` (API billing accounts) |
-| `forceLoginOrgUUID` | `string` | UUID of an organization to auto-select during login (requires `forceLoginMethod`) |
+### Context and Memory
 
-### Session and Behavior
+| Key | Description |
+|-----|-------------|
+| `autoCompactEnabled` / `autoCompactWindow` | Auto-compaction on/off; token window at which it triggers |
+| `autoMemoryEnabled` / `autoMemoryDirectory` | Auto memory on/off; where it is stored |
+| `claudeMdExcludes` | Glob patterns for CLAUDE.md files to skip (monorepos) |
+| `claudeMd` **[M]** | Organization-wide instructions delivered through settings |
+| `plansDirectory` | Where plan files are written |
+| `fileCheckpointingEnabled` | File checkpoints for `/rewind` |
+| `bashOutputMaxChars` | Shell output kept in context |
+| `skillOverrides` | Per-skill visibility: hide from the model, from the menu, or both |
+| `skillListingBudgetFraction` / `skillListingMaxDescChars` | How much context the skill listing may use |
+| `env` | Environment variables for every session (`{"KEY": "value"}`) |
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `cleanupPeriodDays` | `number` | Sessions inactive longer than this are deleted at startup. Default: 30. Set to `0` for immediate cleanup |
-| `language` | `string` | Preferred response language (e.g., `"japanese"`, `"spanish"`, `"french"`) |
-| `outputStyle` | `string` | Configure output style to adjust system prompt |
-| `plansDirectory` | `string` | Customize where plan files are stored. Path relative to project root. Default: `~/.claude/plans` |
-| `showTurnDuration` | `boolean` | Show turn duration messages (e.g., "Cooked for 1m 6s"). Default: true |
-| `teammateMode` | `string` | How agent team teammates display: `auto` (picks split panes in tmux/iTerm2), `in-process`, or `tmux` |
+### Agents, Worktrees, and Sessions
 
-### UI and Display
+| Key | Description |
+|-----|-------------|
+| `agent` | Run the main thread as a named custom agent |
+| `teammateMode` | Agent team display: `in-process` (default), `auto`, or a split-pane mode |
+| `worktree.baseRef` | Branch new worktrees from the remote default or local `HEAD` |
+| `worktree.sparsePaths` | Sparse checkout paths for new worktrees (large monorepos) |
+| `worktree.symlinkDirectories` | Directories to symlink into worktrees instead of copying |
+| `worktree.bgIsolation` | Whether background sessions get their own worktree |
+| `disableAgentView` | Turn off background sessions and agent view |
+| `crossSessionInbound` | Accept, hold, or refuse messages from other sessions |
+| `cleanupPeriodDays` | Delete transcripts older than this at startup (default 30) |
+| `enableWorkflows` / `disableWorkflows` | Dynamic workflows on or off |
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `autoUpdatesChannel` | `string` | Release channel: `"stable"` (about one week old, skips regressions) or `"latest"` (most recent). Default: `"latest"` |
-| `spinnerTipsEnabled` | `boolean` | Show tips in spinner while working. Default: true |
-| `spinnerVerbs` | `object` | Customize spinner verbs. `mode`: `"replace"` (use only your verbs) or `"append"` (mix with defaults). `verbs`: `string[]` |
-| `terminalProgressBarEnabled` | `boolean` | Enable terminal progress bar in Windows Terminal and iTerm2. Default: true |
-| `prefersReducedMotion` | `boolean` | Reduce or disable UI animations (spinners, shimmer, flash effects) for accessibility |
+### Sandbox
 
-### File Suggestion
+| Key | Description |
+|-----|-------------|
+| `sandbox.enabled` | Sandbox shell commands (macOS, Linux, WSL2) |
+| `sandbox.failIfUnavailable` | Refuse to start if the sandbox cannot run |
+| `sandbox.autoAllowBashIfSandboxed` | Run sandboxed commands without prompting (default true) |
+| `sandbox.allowUnsandboxedCommands` | `false` removes the escape hatch: no command runs outside the sandbox |
+| `sandbox.excludedCommands` | Commands that always run outside the sandbox |
+| `sandbox.filesystem.allowWrite` / `.denyWrite` / `.allowRead` / `.denyRead` | Filesystem boundaries beyond the working directory |
+| `sandbox.network.allowedDomains` / `.deniedDomains` | Network allowlist (starts empty) and denylist |
+| `sandbox.network.allowUnixSockets` / `.allowAllUnixSockets` | Unix socket access |
+| `sandbox.network.allowLocalBinding` | Allow binding to local ports |
+| `sandbox.network.httpProxyPort` / `.socksProxyPort` | Use your own filtering proxy |
+| `sandbox.credentials` | Mask credentials so sandboxed processes never see the real values |
+| `sandbox.enableWeakerNestedSandbox` | Weaker mode for unprivileged containers (reduces security) |
+| `sandbox.network.allowManagedDomainsOnly` **[M]** | Only managed network rules apply |
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `fileSuggestion` | `object` | Custom script for `@` file path autocomplete in large monorepos |
-| `respectGitignore` | `boolean` | Whether the `@` file picker respects `.gitignore` patterns. Default: true |
-
-The `fileSuggestion` script receives JSON on stdin with a `query` field and outputs newline-separated file paths on stdout.
-
-### Sandbox Settings
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `sandbox.enabled` | `boolean` | Enable bash sandboxing (macOS, Linux, WSL2). Default: false |
-| `sandbox.autoAllowBashIfSandboxed` | `boolean` | Auto-approve bash commands when sandboxed. Default: true |
-| `sandbox.excludedCommands` | `string[]` | Commands that run outside the sandbox (e.g., `["git", "docker"]`) |
-| `sandbox.allowUnsandboxedCommands` | `boolean` | Allow commands to bypass sandbox via `dangerouslyDisableSandbox`. Set to `false` to enforce strict sandboxing. Default: true |
-| `sandbox.network.allowUnixSockets` | `string[]` | Unix socket paths accessible in sandbox (e.g., SSH agent sockets) |
-| `sandbox.network.allowAllUnixSockets` | `boolean` | Allow all Unix socket connections. Default: false |
-| `sandbox.network.allowLocalBinding` | `boolean` | Allow binding to localhost ports (macOS only). Default: false |
-| `sandbox.network.allowedDomains` | `string[]` | Domains accessible from sandbox. Default: common package registries |
-| `sandbox.network.httpProxyPort` | `number` | Custom HTTP proxy port for sandbox network filtering |
-| `sandbox.network.socksProxyPort` | `number` | Custom SOCKS proxy port for sandbox network filtering |
-| `sandbox.enableWeakerNestedSandbox` | `boolean` | Enable weaker sandbox for unprivileged Docker environments (Linux/WSL2 only). Reduces security. Default: false |
-
-**Complete sandbox example:**
+**Example:**
 
 ```json
 {
   "sandbox": {
     "enabled": true,
-    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
     "excludedCommands": ["docker"],
     "network": {
-      "allowedDomains": ["registry.npmjs.org", "api.github.com"],
-      "allowLocalBinding": true
+      "allowedDomains": ["registry.example.com", "*.internal.example.com"]
     }
   },
   "permissions": {
     "deny": [
-      "Read(.env)",
-      "Read(.env.*)",
-      "Read(secrets/**)",
-      "Write(.env)",
-      "Write(.env.*)",
-      "Write(secrets/**)"
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Edit(./.env*)",
+      "Edit(./secrets/**)"
     ]
   }
 }
 ```
 
-### Attribution Settings
+The sandbox covers shell commands (and the Monitor tool). Read and Edit deny rules cover the file tools. You need both.
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `attribution.commit` | `string` | Custom git commit attribution text. Supports `\n` for multi-line trailers |
-| `attribution.pr` | `string` | Custom PR description attribution text. Set to `""` to disable PR attribution |
+### Hooks and Automation
 
-**Default commit attribution:**
+| Key | Description |
+|-----|-------------|
+| `hooks` | Event-to-handler configuration (see Hook Schema below) |
+| `disableAllHooks` | Turn off all hooks and the custom status line |
+| `allowedHttpHookUrls` | URLs HTTP hooks may call |
+| `httpHookAllowedEnvVars` | Environment variables HTTP hooks may interpolate into headers |
+| `allowManagedHooksOnly` **[M]** | Only managed (and SDK) hooks run |
 
-```
-Generated with Claude Code
+### MCP
 
-Co-Authored-By: Claude <noreply@anthropic.com>
-```
+| Key | Description |
+|-----|-------------|
+| `enableAllProjectMcpServers` | Approve every server in project `.mcp.json` files |
+| `enabledMcpjsonServers` / `disabledMcpjsonServers` | Approve or reject specific project servers |
+| `allowedMcpServers` / `deniedMcpServers` | Allowlist / denylist by name, command, or URL pattern. Empty allowlist = lockdown; denylist wins |
+| `disableClaudeAiConnectors` | Ignore connectors from your Claude account |
+| `managedMcpServers` **[M]** | Servers the organization provides |
+| `allowManagedMcpServersOnly` **[M]** | Only organization-provided servers may connect |
 
-**Customization example:**
+### Plugins and Skills
 
-```json
-{
-  "attribution": {
-    "commit": "Generated with AI\n\nCo-Authored-By: AI <ai@example.com>",
-    "pr": ""
-  }
-}
-```
+| Key | Description |
+|-----|-------------|
+| `enabledPlugins` | Plugins on for this scope (`"name@marketplace": true`) |
+| `extraKnownMarketplaces` | Marketplaces teammates are offered when they trust the folder |
+| `pluginConfigs` | Per-plugin user configuration values |
+| `disableBundledSkills` | Remove bundled skills and workflows |
+| `disableSkillShellExecution` | Block shell commands embedded in skills |
+| `strictKnownMarketplaces` **[M]** | Restrict marketplaces to an approved list |
+| `blockedMarketplaces` **[M]** | Block specific marketplaces |
+| `strictPluginOnlyCustomization` **[M]** | Allow agents, hooks, MCP, or skills only from plugins |
 
-### Plugin Settings
+Marketplace sources can be a hosted repository shorthand, any git URL, a URL to a marketplace file, an npm package, or a local file or directory. Plugin scripts reference their own directory as `${CLAUDE_PLUGIN_ROOT}` and persistent data as `${CLAUDE_PLUGIN_DATA}`.
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `enabledPlugins` | `string[]` | Active plugin identifiers in `plugin-name@marketplace-name` format |
-| `extraKnownMarketplaces` | `object[]` | Additional plugin marketplace sources with explicit trust boundaries |
+### Git and Attribution
 
-Plugin hooks are defined in `hooks/hooks.json` within the plugin root directory. Hooks include an optional top-level `description` field. Plugin scripts reference their own directory via the `${CLAUDE_PLUGIN_ROOT}` variable.
+| Key | Description |
+|-----|-------------|
+| `attribution.commit` | Commit trailer text; `""` omits it |
+| `attribution.pr` | Pull request description footer; `""` omits it |
+| `attribution.sessionUrl` | Whether to include a link to the session |
+| `includeGitInstructions` | Built-in commit and PR instructions on or off |
+| `prUrlTemplate` | Pull request URL format for self-hosted version control |
+| `includeCoAuthoredBy` | Deprecated; use `attribution` |
 
-### MCP Server Approval
+### Authentication and Providers
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `enableAllProjectMcpServers` | `boolean` | Automatically approve all MCP servers defined in project `.mcp.json` files |
-| `enabledMcpjsonServers` | `string[]` | Approve specific MCP servers from `.mcp.json` (e.g., `["memory", "github"]`) |
-| `disabledMcpjsonServers` | `string[]` | Reject specific MCP servers from `.mcp.json` |
+| Key | Description |
+|-----|-------------|
+| `apiKeyHelper` | Script that prints an API credential (refresh with `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`) |
+| `awsAuthRefresh` / `awsCredentialExport` / `gcpAuthRefresh` | Cloud-provider credential scripts |
+| `otelHeadersHelper` | Script that prints OpenTelemetry headers |
+| `forceLoginMethod` | `claudeai` or `console` |
+| `forceLoginOrgUUID` | Organization to select at login |
+| `forceLoginGatewayUrl` **[M]** | Send sign-in through your Claude apps gateway |
+| `allowedProviders` **[M]** | Restrict which model providers may be used |
 
-### Managed-Only Settings
+### Updates
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `strictKnownMarketplaces` | `boolean` | Restrict plugins to approved marketplaces only |
-| `allowManagedHooksOnly` | `boolean` | Block user, project, and plugin hooks; only managed and SDK hooks run |
-| `allowManagedPermissionRulesOnly` | `boolean` | Prevent user/project settings from defining `allow`, `ask`, or `deny` permission rules |
-| `disableAllHooks` | `boolean` | Disable all hooks and any custom status line |
-| `allowedMcpServers` | `object[]` | Allowlist of MCP servers users can configure. Undefined = no restrictions. Empty array = lockdown. Denylist takes precedence |
-| `deniedMcpServers` | `object[]` | Denylist of MCP servers that are explicitly blocked across all scopes |
+| Key | Description |
+|-----|-------------|
+| `autoUpdatesChannel` | `latest` or `stable` |
+| `minimumVersion` | Do not auto-update below this version |
+| `requiredMinimumVersion` / `requiredMaximumVersion` **[M]** | Refuse to run outside this version range |
+
+### Interface
+
+| Key | Description |
+|-----|-------------|
+| `statusLine` | Custom status line command |
+| `fileSuggestion` | Custom script for `@` file autocomplete (large monorepos) |
+| `respectGitignore` | Whether the `@` picker honors `.gitignore` (default true) |
+| `outputStyle` | Active output style |
+| `tui` | Renderer: `default` or `fullscreen` |
+| `editorMode` | `normal` or `vim` |
+| `theme`, `spinnerVerbs`, `spinnerTipsEnabled`, `prefersReducedMotion`, `showTurnDuration`, `timeFormat` | Display preferences |
+| `companyAnnouncements` | Messages shown at startup |
+
+### Managed-Only Enterprise Controls
+
+| Key | Description |
+|-----|-------------|
+| `policyHelper` | Script that returns policy dynamically |
+| `forceRemoteSettingsRefresh` | Refuse to start until server-managed settings are fetched |
+| `disableSideloadFlags` | Block `--plugin-dir`, `--plugin-url`, and similar session-only loading |
+| `sshHostAllowlist` | Hosts the desktop app may open SSH sessions to |
+| `channelsEnabled` / `allowedChannelPlugins` | Channel notifications and which plugins may send them |
 
 ---
 
-## Settings Scope Hierarchy
+## Environment Variables (Selected)
 
-| Priority | Scope | Location | Shared | Overridable |
-|----------|-------|----------|--------|-------------|
-| 1 (highest) | Managed | System directories or server-managed (IT-deployed) | Org-wide | No |
-| 2 | CLI | Command-line flags | No | Session only |
-| 3 | Local | `.claude/settings.local.json` | No (gitignored) | By managed/CLI |
-| 4 | Project | `.claude/settings.json` | Yes (VCS) | By managed/CLI/local |
-| 5 (lowest) | User | `~/.claude/settings.json` | No | By all above |
+Claude Code reads well over two hundred environment variables. These are the ones experienced users actually set. Any of them can also go in a settings file's `env` block.
 
-### When to Use Each Scope
-
-| Scope | Use For |
-|-------|---------|
-| **Managed** | Security policies enforced org-wide, API key helpers, forced login methods, MCP allowlists/denylists, sandbox requirements |
-| **User** | Personal preferences (model, language, spinner verbs, reduced motion), personal API keys, user-level permissions |
-| **Project** | Shared team standards (permissions, hooks, MCP servers), coding conventions, attribution settings |
-| **Local** | Personal overrides for a specific project, experimental settings, credentials you do not want committed |
-
-### How Scopes Interact
-
-Settings merge across scopes. For most keys, higher-priority scopes override lower ones. Permission rules follow a specific evaluation order: **deny rules first, then ask, then allow** — the first matching rule wins, evaluated across all scopes.
-
-### Server-Managed Settings
-
-Organizations without device management infrastructure can use server-managed settings, which deliver configurations from Anthropic's servers for Claude for Enterprise customers. These function identically to file-based managed settings and cannot be overridden by user or project settings.
-
----
-
-## Environment Variables
-
-Claude Code supports over 70 environment variables. The following are the most commonly used, grouped by function.
-
-### API and Authentication
+### Authentication and Providers
 
 | Variable | Description |
 |----------|-------------|
-| `ANTHROPIC_API_KEY` | API key for direct Anthropic access |
-| `CLAUDE_CODE_USE_BEDROCK` | Enable cloud provider Bedrock integration (`1`) |
-| `CLAUDE_CODE_USE_VERTEX` | Enable cloud provider Vertex AI integration (`1`) |
-| `ANTHROPIC_BASE_URL` | Custom API base URL |
-| `CLAUDE_CODE_AUTH_TOKEN` | Override authentication token |
+| `ANTHROPIC_API_KEY` | API key; overrides subscription login while set |
+| `ANTHROPIC_AUTH_TOKEN` | Custom `Authorization: Bearer` value (gateways) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Subscription token for automation (from `claude setup-token`) |
+| `ANTHROPIC_BASE_URL` | Custom API endpoint (proxies, LLM gateways) |
+| `ANTHROPIC_CUSTOM_HEADERS` | Extra request headers, `Name: Value` per line |
+| `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` / `CLAUDE_CODE_USE_FOUNDRY` | Route through a cloud provider (`1`) |
+| `CLAUDE_CODE_CLIENT_CERT` / `CLAUDE_CODE_CLIENT_KEY` | Mutual TLS |
 
-### Model Configuration
-
-| Variable | Description |
-|----------|-------------|
-| `ANTHROPIC_MODEL` | Override default model |
-| `ANTHROPIC_SMALL_FAST_MODEL` | Model for lightweight operations (Haiku tasks) |
-| `CLAUDE_CODE_MAX_TOKENS` | Maximum tokens per response |
-| `CLAUDE_CODE_MAX_THINKING_TOKENS` | Maximum tokens for thinking/reasoning |
-
-### Proxy and Network
+### Models and Reasoning
 
 | Variable | Description |
 |----------|-------------|
-| `HTTP_PROXY` / `HTTPS_PROXY` | HTTP(S) proxy URL |
-| `NO_PROXY` | Comma-separated bypass domains |
-| `ANTHROPIC_PROXY_URL` | Anthropic-specific proxy URL |
+| `ANTHROPIC_MODEL` | Session model; beats the `model` setting |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` / `_SONNET_MODEL` / `_HAIKU_MODEL` / `_FABLE_MODEL` | What each alias resolves to (pin versions on cloud providers) |
+| `ANTHROPIC_SMALL_FAST_MODEL` | Deprecated; use `ANTHROPIC_DEFAULT_HAIKU_MODEL` |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | Model for subagents |
+| `CLAUDE_CODE_EFFORT_LEVEL` | Effort level, including `auto`; beats `--effort` and `/effort` |
+| `MAX_THINKING_TOKENS` | Fixed thinking budget, for older models that use one |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | Output token cap per request |
+| `CLAUDE_CODE_DISABLE_FAST_MODE` | Disable fast mode |
+| `CLAUDE_CODE_DISABLE_1M_CONTEXT` | Hold sessions to a 200K window |
 
 ### Context and Compaction
 
 | Variable | Description |
 |----------|-------------|
-| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | Auto-compaction threshold percentage (default: 95) |
-| `CLAUDE_CODE_CONTEXT_LIMIT` | Maximum context window size |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | Auto-compact window in tokens (100K-1M); beats `/autocompact` |
+| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | Trigger compaction at a percentage of the window (can only lower it) |
+| `DISABLE_AUTO_COMPACT` / `DISABLE_COMPACT` | Turn off auto-compaction / all compaction |
+| `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | `1` disables auto memory |
+| `CLAUDE_CODE_DISABLE_CLAUDE_MDS` | `1` skips all CLAUDE.md files |
+| `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` | `1` loads CLAUDE.md from `--add-dir` directories |
+| `CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING` | `1` disables code restore in `/rewind` |
 
-### Feature Flags
-
-| Variable | Description |
-|----------|-------------|
-| `ENABLE_TOOL_SEARCH` | Enable/disable MCP tool search and deferred loading |
-| `CLAUDE_CODE_ENABLE_AGENT_TEAMS` | Enable experimental agent teams |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Disable telemetry and non-essential network calls |
-
-### Headless/CI
+### Tools and Execution
 
 | Variable | Description |
 |----------|-------------|
-| `CLAUDE_CODE_ENTRYPOINT` | Set to `cli` for headless environments |
-| `CLAUDE_CODE_BUDGET_TOKENS` | Token budget for headless sessions |
-| `CLAUDE_CODE_MAX_TURNS` | Maximum conversation turns in headless mode |
+| `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` | Shell command timeouts (defaults 2 and 10 minutes) |
+| `BASH_MAX_OUTPUT_LENGTH` | Shell output characters returned to Claude |
+| `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR` | Return to the project directory after each command |
+| `CLAUDE_ENV_FILE` | Script sourced before every shell command (populated by SessionStart and related hooks) |
+| `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` | Disable background commands, background subagents, and Ctrl+B |
+| `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` | Concurrent subagents per session (default 20) |
+| `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | Nesting depth (default 3) |
+| `CLAUDE_CODE_ENABLE_TODO_TOOLS` | `1` provides task tools on every model |
+| `CLAUDE_CODE_TASK_LIST_ID` | Share a task list across sessions |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` enables agent teams |
+| `CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS` | Concurrency for dynamic workflows |
+| `CLAUDE_CODE_DISABLE_WORKFLOWS` / `CLAUDE_CODE_DISABLE_CRON` | Turn off workflows / scheduled tasks and `/loop` |
 
-### Output and Formatting
-
-| Variable | Description |
-|----------|-------------|
-| `CLAUDE_CODE_OUTPUT_FORMAT` | Output format for headless mode (`text`, `json`, `stream-json`) |
-| `CLAUDE_CODE_HIDE_TOOL_OUTPUT` | Suppress tool output display in terminal |
-
-### Debugging and Diagnostics
-
-| Variable | Description |
-|----------|-------------|
-| `CLAUDE_CODE_DEBUG` | Enable debug logging (`1`) |
-| `CLAUDE_CODE_LOG_LEVEL` | Set logging verbosity level |
-| `CLAUDE_CODE_VERBOSE` | Enable verbose output |
-
-### Session and Behavior
+### MCP
 
 | Variable | Description |
 |----------|-------------|
-| `CLAUDE_CODE_SKIP_CLAUDE_MD` | Skip loading CLAUDE.md files (`1`) |
-| `CLAUDE_CODE_THINKING_MODE` | Thinking mode (`enabled`, `disabled`, `budget`) |
-| `CLAUDE_CODE_THINKING_BUDGET` | Token budget for extended thinking |
+| `ENABLE_TOOL_SEARCH` | Control deferred MCP tool loading |
+| `MAX_MCP_OUTPUT_TOKENS` | Cap on MCP tool result size (default 25,000 tokens) |
+| `MCP_TIMEOUT` / `MCP_TOOL_TIMEOUT` | Server startup / tool call timeouts (milliseconds) |
+| `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` | Move long MCP calls to the background after this long |
 
-### Telemetry
+### Non-Interactive and CI
 
 | Variable | Description |
 |----------|-------------|
-| `CLAUDE_CODE_DISABLE_TELEMETRY` | Disable usage telemetry (`1`) |
-| `CLAUDE_CODE_TELEMETRY_ENDPOINT` | Custom telemetry collection endpoint |
+| `CLAUDE_CODE_SIMPLE` | Same as `--bare` |
+| `CLAUDE_CODE_MAX_TURNS` | Turn cap when `--max-turns` is not passed |
+| `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT` | Same as `--forward-subagent-text` |
+| `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` | How long `-p` waits for background work (default 10 minutes) |
+| `CLAUDE_CODE_RETRY_WATCHDOG` | Wait through long outages instead of failing (unattended runs) |
+| `CLAUDE_CODE_RESTRICTED` | Same as `--restricted` |
+| `CLAUDECODE` | Set to `1` in Claude Code's subprocesses, so scripts can detect it |
+| `CLAUDE_CODE_REMOTE` | `true` inside cloud sessions |
+
+### Network
+
+| Variable | Description |
+|----------|-------------|
+| `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | Corporate proxy configuration |
+| `CLAUDE_CODE_CERT_STORE` | CA sources: `bundled`, `system`, or both |
+| `API_TIMEOUT_MS` | API request timeout (default 10 minutes) |
+| `CLAUDE_CODE_MAX_RETRIES` | API retry count |
+
+### Telemetry and Privacy
+
+| Variable | Description |
+|----------|-------------|
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | `1` enables OpenTelemetry export (configure with standard `OTEL_*` variables) |
+| `OTEL_LOG_USER_PROMPTS` / `OTEL_LOG_TOOL_DETAILS` | Include prompt text / tool details in telemetry |
+| `DISABLE_TELEMETRY` / `DISABLE_ERROR_REPORTING` | Opt out of usage telemetry / error reports (any value opts out, even `0`) |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Disable updates, telemetry, and feature-flag fetching |
+| `DISABLE_AUTOUPDATER` / `DISABLE_UPDATES` | Disable background updates / all updates |
+
+### Debugging
+
+| Variable | Description |
+|----------|-------------|
+| `CLAUDE_CODE_DEBUG_LOGS_DIR` | Debug log location (debug mode must be on) |
+| `CLAUDE_CODE_DEBUG_LOG_LEVEL` | `verbose`, `debug`, `info`, `warn`, `error` |
+| `CLAUDE_CODE_SAFE_MODE` | Same as `--safe-mode` |
+| `CLAUDE_CONFIG_DIR` | Move `~/.claude` elsewhere (settings, history, plugins) |
 
 ---
 
 ## Tools Inventory
 
-| Tool | Description |
-|------|-------------|
-| `Bash` | Execute shell commands. Working directory persists; environment does not. |
-| `Read` | Read file contents. Supports images, PDFs, notebook files. |
-| `Write` | Create or overwrite files. |
-| `Edit` | Exact string replacement in files. Requires unique match. |
-| `Glob` | File pattern matching. Returns paths sorted by modification time. |
-| `Grep` | Content search with regex support. File type filtering, context lines. |
-| `WebFetch` | Fetch and process URL content. Auto-upgrades HTTP to HTTPS. |
-| `WebSearch` | Web search with domain filtering. Returns formatted results. |
-| `Task` | Spawn subagents with isolated context. Supports foreground/background. |
-| `Skill` | Invoke skill-based workflows within conversation. |
-| `NotebookEdit` | Edit notebook cells (.ipynb). Replace, insert, or delete. |
-| `LSP` | Language Server Protocol operations. Diagnostics, go-to-definition, references. |
-| `TeamCreate` | Create agent team (experimental). |
-| `TaskCreate` | Create task in agent team task list. |
-| `TaskUpdate` | Update task status in agent team. |
-| `TaskList` | List tasks for an agent team. |
-| `SendMessage` | Send message between agent team members. |
-| `TeamDelete` | Delete an agent team. |
-| `TodoRead` | Read current task/todo list. |
-| `TodoWrite` | Write/update task/todo items. |
+| Tool | Description | Needs permission |
+|------|-------------|------------------|
+| `Read` | Read files, images, PDFs, notebooks | No |
+| `Write` | Create or overwrite files | Yes |
+| `Edit` | Targeted string replacement | Yes |
+| `NotebookEdit` | Edit notebook cells | Yes |
+| `Bash` / `PowerShell` | Run shell commands | Yes |
+| `Monitor` | Background command whose output lines stream to Claude | Yes |
+| `Glob` / `Grep` | File and content search (absent by default on Linux, macOS, WSL) | No |
+| `LSP` | Definitions, references, diagnostics via language-server plugins | No |
+| `WebFetch` / `WebSearch` | Web access | Yes |
+| `Agent` | Spawn a subagent (formerly `Task`) | No |
+| `SendMessage` / `ListAgents` | Message teammates, subagents, or other sessions | No |
+| `Skill` | Run a skill in the main conversation | Yes |
+| `Workflow` | Run a dynamic workflow | Yes |
+| `TaskCreate` / `TaskGet` / `TaskList` / `TaskUpdate` | Task checklist (default only on some models) | No |
+| `TaskStop` | Stop a background task or agent | No |
+| `TodoWrite` | Legacy checklist (`CLAUDE_CODE_ENABLE_TASKS=0`) | No |
+| `CronCreate` / `CronList` / `CronDelete` / `ScheduleWakeup` | Session-scoped scheduling (`/loop`) | No |
+| `RemoteTrigger` | Cloud scheduled tasks (`/schedule`) | Yes |
+| `AskUserQuestion` | Multiple-choice questions | No |
+| `EnterPlanMode` / `ExitPlanMode` | Plan mode transitions | No / Yes |
+| `EnterWorktree` / `ExitWorktree` | Move the session into or out of a worktree | No |
+| `ToolSearch` | Load deferred tools on demand | No |
+| `ListMcpResourcesTool` / `ReadMcpResourceTool` | MCP resources | No |
+| `PushNotification` | Desktop and phone notifications | No |
+| `Artifact` | Publish a page to the Claude apps | Yes |
+
+Removed since the first edition: `TaskOutput` (Claude reads the output file with `Read`), `TodoRead`, `TeamCreate`, `TeamDelete` (agent teams are created by asking).
 
 ---
 
 ## Hook Configuration Schema
 
-### Common Input Fields
+### Structure
 
-Every hook event receives these fields on stdin as JSON:
-
-| Field | Description |
-|-------|-------------|
-| `session_id` | Current session identifier |
-| `transcript_path` | Path to conversation JSON file |
-| `cwd` | Current working directory when the hook is invoked |
-| `permission_mode` | Active permission mode: `"default"`, `"plan"`, `"acceptEdits"`, `"dontAsk"`, or `"bypassPermissions"` |
-| `hook_event_name` | Name of the event that fired |
-
-Each event adds its own fields (e.g., `tool_name`, `tool_input` for PreToolUse).
-
-### Event Types
-
-| Event | Fires | Can Block? | Event-Specific Fields |
-|-------|-------|------------|----------------------|
-| `PreToolUse` | Before any tool executes | Yes | `tool_name`, `tool_input` |
-| `PostToolUse` | After any tool executes | Yes (via decision) | `tool_name`, `tool_input`, `tool_output` |
-| `PostToolUseFailure` | When a tool execution fails | Yes (via decision) | `tool_name`, `error`, `is_interrupt` |
-| `UserPromptSubmit` | Before processing a user prompt | Yes | `prompt` |
-| `Notification` | On status notifications (`permission_prompt`, `idle_prompt`, `auth_success`, `elicitation_dialog`) | No | `message`, `type` |
-| `Stop` | When Claude stops generating | Yes (via decision) | `stop_hook_active` |
-| `SessionStart` | At session initialization | No | `source` (`startup`, `resume`, `clear`, `compact`), `model`, optionally `agent_type` |
-| `SessionEnd` | At session termination | No | `reason` (`clear`, `logout`, `prompt_input_exit`, `bypass_permissions_disabled`, `other`) |
-| `PermissionRequest` | Before showing permission dialog | Yes | `tool_name`, permission details; supports `updatedInput`, `updatedPermissions` |
-| `PreCompact` | Before context compaction | No | `trigger` (`manual` or `auto`), `custom_instructions` |
-| `PostCompact` | After context compaction | No | Compacted context |
-| `SubagentStart` | When a subagent spawns | No | `agent_id`, `agent_type` |
-| `SubagentStop` | When a subagent completes | Yes (via decision) | `agent_id`, `agent_type`, `agent_transcript_path`, `stop_hook_active` |
-| `TeammateIdle` | When agent team teammate is about to go idle | Yes (exit code 2) | `teammate_name` |
-| `TaskCompleted` | When a task is marked completed | Yes (exit code 2) | `task_id`, `task_subject` |
-
-### Handler Types (3)
-
-**Command Handler**
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
         "matcher": "Bash",
-        "handler": {
-          "type": "command",
-          "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validate.sh"
-        }
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validate.sh",
+            "if": "Bash(git push *)",
+            "timeout": 30,
+            "onFailure": "block"
+          }
+        ]
       }
     ]
   }
 }
 ```
-Executes a shell command. Receives event JSON on stdin. Communicates results via exit codes and stdout JSON.
 
-**Prompt Handler**
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Write(*.sql)",
-        "handler": {
-          "type": "prompt",
-          "prompt": "Review this SQL file write for safety. Allow or deny."
-        }
-      }
-    ]
-  }
-}
-```
-Sends context plus prompt to a Claude model (Haiku by default) for single-turn evaluation. Returns structured `{"ok": true/false, "reason": "..."}` decision. Uses `$ARGUMENTS` placeholder for event data.
+Event name → list of matcher groups → list of handlers.
 
-**Agent Handler**
-```json
-{
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Bash",
-        "handler": {
-          "type": "agent",
-          "agent": "security-reviewer",
-          "tools": ["Read", "Grep"]
-        }
-      }
-    ]
-  }
-}
-```
-Spawns a subagent with multi-turn tool access for complex verification. Up to 50 turns.
+### Handler Types
 
-### Handler Common Fields
+| Type | Key fields | Default timeout |
+|------|-----------|-----------------|
+| `command` | `command`, `args` (exec form, no shell), `shell` | 600s |
+| `http` | `url`, `headers`, `allowedEnvVars` | 600s |
+| `mcp_tool` | `server`, `tool`, `input` | 600s |
+| `prompt` | `prompt` (`$ARGUMENTS` = event JSON), `model` | 30s |
+| `agent` | `prompt` (experimental; multi-turn with tools) | 60s |
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `timeout` | No | Timeout in seconds. Default: 10 (command), 30 (prompt), 60 (agent) |
-| `statusMessage` | No | Custom spinner message displayed while hook runs |
-| `once` | No | If `true`, runs only once per session then is removed. Skills only |
-| `async` | No | If `true`, runs in background without blocking. Output delivered on next turn via `systemMessage` or `additionalContext`. Cannot block actions |
+Common fields: `if` (one permission-rule pattern), `timeout` (seconds), `statusMessage`, `once` (run once per session), `async` (background, cannot block), `asyncRewake` (background; exit 2 wakes Claude), `onFailure` (`"continue"` default, or `"block"` to fail closed).
 
-### Exit Code Behavior
+Prompt and agent handlers return `{"ok": true}` or `{"ok": false, "reason": "..."}`.
 
-| Exit Code | Meaning | Effect |
-|-----------|---------|--------|
-| **0** | Success | Action proceeds. Stdout is parsed for JSON output fields. Stdout shown in verbose mode (`Ctrl+O`) except for `UserPromptSubmit` and `SessionStart` where it becomes context |
-| **2** | Blocking error | Action is blocked. Stdout/JSON ignored. Stderr text fed back to Claude as error message |
-| **Other** | Non-blocking error | Stderr shown in verbose mode. Execution continues |
+### Events
 
-### JSON Output Fields (on exit 0)
+| Can block | Events |
+|-----------|--------|
+| Yes | `PreToolUse`, `PostToolBatch`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `SubagentStop`, `TeammateIdle`, `TaskCreated`, `TaskCompleted`, `ConfigChange`, `PreCompact`, `PreModelSwitch`, `Elicitation`, `ElicitationResult`, `WorktreeCreate`, `WorktreeRemove` |
+| No | `SessionStart`, `Setup`, `SessionEnd`, `PermissionRequest`*, `PermissionDenied`, `PostToolUse`**, `PostToolUseFailure`, `Notification`, `MessageDisplay`, `SubagentStart`, `StopFailure`, `CwdChanged`, `DirectoryAdded`, `FileChanged`, `InstructionsLoaded`, `PostCompact`, `PostModelSwitch` |
 
-| Field | Type | Effect |
-|-------|------|--------|
-| `continue` | `boolean` | If `false`, stops further hook processing for this event |
-| `stopReason` | `string` | Message shown when stopping |
-| `suppressOutput` | `boolean` | If `true`, suppresses default hook output |
-| `systemMessage` | `string` | Message injected into conversation as system context |
-| `additionalContext` | `string` | Extra context added to the event |
-| `updatedInput` | `object` | Modified tool input before execution (PreToolUse, PermissionRequest) |
-| `updatedPermissions` | `object` | Modified permission settings (PermissionRequest; equivalent to "always allow") |
-| `permissionDecision` | `string` | `"allow"`, `"deny"`, or `"ask"` for PreToolUse hooks (inside `hookSpecificOutput`) |
-| `decision` | `string` | `"block"` to stop the action (UserPromptSubmit, PostToolUse, PostToolUseFailure, Stop, SubagentStop) |
+\* PermissionRequest ignores exit 2; deny with its JSON `decision` instead.
+\** PostToolUse cannot un-run the tool, but `decision: "block"` feeds a reason back to Claude and `updatedToolOutput` replaces the result.
+
+### Matchers
+
+- `"*"`, `""`, or omitted: everything
+- Plain names and lists: `Edit|Write` or `Edit,Write`
+- Anything else is an unanchored regex: `^Bash$`, `mcp__memory__.*`
+- MCP tools: `mcp__<server>__<tool>`; plugin servers: `mcp__plugin_<plugin>_<server>__<tool>`
+- SessionStart matches its source: `startup`, `resume`, `clear`, `compact`, `fork`
+
+### Input (stdin JSON)
+
+Common: `session_id`, `prompt_id`, `transcript_path`, `cwd`, `permission_mode`, `effort`, `hook_event_name`, plus `agent_id`/`agent_type` inside subagents. Tool events add `tool_name`, `tool_input`, `tool_use_id`.
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success. A single JSON object on stdout is applied |
+| `2` | Block. Stderr goes to Claude as the reason; JSON is ignored |
+| Other (including `1`) | Non-blocking error; the action proceeds unless `onFailure: "block"` |
+
+### JSON Output
+
+| Field | Effect |
+|-------|--------|
+| `continue: false` | Stop Claude entirely |
+| `stopReason` | Message shown to the user when stopping |
+| `systemMessage` | Warning shown to the user |
+| `decision: "block"` + `reason` | Block for UserPromptSubmit, PostToolUse, Stop, SubagentStop, ConfigChange |
+| `hookSpecificOutput.hookEventName` | Required inside `hookSpecificOutput` |
+| `hookSpecificOutput.permissionDecision` | PreToolUse: `allow`, `deny`, `ask`, `defer` |
+| `hookSpecificOutput.permissionDecisionReason` | Reason shown with the decision |
+| `hookSpecificOutput.updatedInput` | PreToolUse: replace tool arguments |
+| `hookSpecificOutput.additionalContext` | Context for Claude (capped at 10,000 characters) |
+| `hookSpecificOutput.updatedToolOutput` | PostToolUse: replace the tool result |
+| `hookSpecificOutput.decision` | PermissionRequest: `{"behavior": "allow" \| "deny", "updatedInput": {...}}` |
+| `retry: true` | PermissionDenied: Claude may try another approach |
 
 ### Environment Variables in Hooks
 
 | Variable | Description |
 |----------|-------------|
-| `$CLAUDE_PROJECT_DIR` | Project root directory. Wrap in quotes for paths with spaces |
-| `${CLAUDE_PLUGIN_ROOT}` | Plugin root directory, for scripts bundled with a plugin |
-| `$CLAUDE_ENV_FILE` | (SessionStart only) File path for persisting environment variables. Write `export` statements to this file to make variables available in all subsequent Bash commands |
+| `CLAUDE_PROJECT_DIR` | Project root. Quote it: `"$CLAUDE_PROJECT_DIR"` |
+| `CLAUDE_PLUGIN_ROOT` / `CLAUDE_PLUGIN_DATA` | Plugin install directory / persistent data directory |
+| `CLAUDE_ENV_FILE` | SessionStart, Setup, CwdChanged, FileChanged: append `export` lines to set variables for later shell commands |
+| `CLAUDE_EFFORT` | Current effort level |
+| `CLAUDE_CODE_REMOTE` | `true` in cloud sessions |
 
-**CLAUDE_ENV_FILE example:**
 ```bash
 #!/bin/bash
 if [ -n "$CLAUDE_ENV_FILE" ]; then
   echo 'export NODE_ENV=production' >> "$CLAUDE_ENV_FILE"
-  echo 'export DEBUG_LOG=true' >> "$CLAUDE_ENV_FILE"
 fi
 exit 0
 ```
 
-### Matcher Syntax
+### Trust
 
-- Exact tool name: `Bash`, `Write`, `Edit`
-- Tool with specifier: `Bash(npm *)`, `Write(*.env)`
-- MCP tools: `mcp__servername__toolname`
-- Regex patterns supported in specifiers
-- `*` matches any tool
-
-### Hook Decision Control (PreToolUse)
-
-PreToolUse uses `hookSpecificOutput.permissionDecision`:
-
-| Decision | Effect |
-|----------|--------|
-| `"allow"` | Proceed without user prompt |
-| `"deny"` | Block execution; `reason` shown to Claude |
-| `"ask"` | Show permission prompt (can combine with `updatedInput` to show modified input) |
-| Omitted / no output | Fall through to normal permission evaluation |
-
-### Hook Decision Control (PermissionRequest)
-
-| Decision | Effect |
-|----------|--------|
-| `"approve"` | Auto-approve without user prompt |
-| `"deny"` | Auto-deny without user prompt |
-| Omitted / no output | Show normal permission prompt |
-
-Supports `updatedInput` and `updatedPermissions` (equivalent to "always allow" options).
-
-### Hook Decision Control (TeammateIdle / TaskCompleted)
-
-These events use exit codes only, not JSON decision control:
-
-| Exit Code | Effect |
-|-----------|--------|
-| `0` | Allow the action (teammate goes idle, task marked complete) |
-| `2` | Block the action; stderr fed back as feedback to continue working |
-
-### Hook Security Model
-
-Hooks are snapshotted at session startup. If hooks are modified externally during a session, Claude Code warns and requires review in the `/hooks` menu before changes apply. This prevents malicious mid-session changes.
+Hooks from a repository's settings wait for the workspace trust dialog in interactive sessions. `-p` and SDK runs treat the folder as trusted; use `--bare` or `disableAllHooks` when scripting over code you did not write. `/hooks` shows what is configured and where it came from.
 
 ---
 
 ## MCP Configuration Format
 
-### .mcp.json (Project Root)
+### .mcp.json (Project Scope)
 
 ```json
 {
   "mcpServers": {
-    "server-name": {
+    "local-tool": {
+      "type": "stdio",
       "command": "node",
-      "args": ["path/to/server.js"],
-      "env": {
-        "API_KEY": "${ENV_VAR_NAME}"
-      },
-      "cwd": "./optional-working-directory"
+      "args": ["tools/server.js"],
+      "env": { "API_KEY": "${TOOL_API_KEY}" }
     },
-    "remote-server": {
-      "url": "https://mcp.example.com/sse",
-      "headers": {
-        "Authorization": "Bearer ${TOKEN}"
-      }
+    "tracker": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${TRACKER_TOKEN}" }
     }
   }
 }
 ```
 
-### Server Configuration Fields
+| Field | Description |
+|-------|-------------|
+| `type` | `stdio` for local processes, `http` for remote servers (`sse` is deprecated) |
+| `command` / `args` / `env` | Local process; `env` supports `${VAR}` and `${VAR:-default}` |
+| `url` / `headers` | Remote endpoint |
+| `headersHelper` | Command that prints headers at connect time (short-lived tokens) |
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `command` | `string` | Yes (local) | Executable to launch |
-| `args` | `string[]` | No | Command arguments |
-| `env` | `object` | No | Environment variables (supports `${VAR}` interpolation) |
-| `cwd` | `string` | No | Working directory for server process |
-| `url` | `string` | Yes (remote) | SSE endpoint for remote servers |
-| `headers` | `object` | No | HTTP headers for remote connections |
-
-### Managed MCP Settings
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `mcpServers.allowlist` | `string[]` | Only these servers may be configured |
-| `mcpServers.denylist` | `string[]` | These servers are blocked |
-
-### Plugin Marketplace Sources
-
-| Source Type | Format |
-|-------------|--------|
-| Git hosting platform | `githost:org/repo` |
-| Git URL | `git:https://example.com/repo.git` |
-| npm | `npm:package-name` |
-| URL | `url:https://example.com/plugin.tar.gz` |
-| File | `file:/path/to/plugin` |
-| Directory | `directory:/path/to/plugin-dir` |
-| Host pattern | `host:*.internal.company.com` |
+Scopes: local (default, stored in `~/.claude.json` for this project), project (`.mcp.json`), user (`~/.claude.json`, all projects). Same name in several scopes: local beats project beats user, which beats plugin servers and account connectors; organization-provided servers rank above all.
 
 ---
 
@@ -577,53 +549,51 @@ Hooks are snapshotted at session startup. If hooks are modified externally durin
 ```json
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "opus",
+  "effortLevel": "high",
   "permissions": {
+    "defaultMode": "acceptEdits",
     "allow": [
-      "Bash(npm test)",
+      "Bash(npm run test *)",
       "Bash(npm run lint)",
-      "Bash(git *)",
-      "Read",
-      "Glob",
-      "Grep"
+      "Bash(git diff *)",
+      "Bash(git log *)"
+    ],
+    "ask": [
+      "Bash(git push *)"
     ],
     "deny": [
-      "Write(.env)",
-      "Write(.env.*)",
-      "Read(secrets/**)"
+      "Read(./.env*)",
+      "Read(./secrets/**)",
+      "Edit(./.env*)"
     ]
   },
   "env": {
-    "NODE_ENV": "development",
-    "LOG_LEVEL": "info"
-  },
-  "model": "claude-opus-4-6",
-  "language": "english",
-  "autoUpdatesChannel": "stable",
-  "showTurnDuration": true,
-  "spinnerVerbs": {
-    "mode": "append",
-    "verbs": ["Pondering", "Crafting"]
+    "NODE_ENV": "development"
   },
   "sandbox": {
     "enabled": true,
-    "autoAllowBashIfSandboxed": true,
-    "excludedCommands": ["docker", "git"],
     "network": {
-      "allowedDomains": ["registry.npmjs.org", "api.github.com"]
+      "allowedDomains": ["registry.example.com"]
     }
   },
+  "claudeMdExcludes": ["**/vendor/**/CLAUDE.md"],
+  "worktree": {
+    "symlinkDirectories": ["node_modules"]
+  },
   "attribution": {
-    "commit": "Generated with Claude Code\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
-    "pr": "Generated with Claude Code"
+    "pr": ""
   },
   "hooks": {
-    "PreToolUse": [
+    "PostToolUse": [
       {
-        "matcher": "Bash",
-        "handler": {
-          "type": "command",
-          "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validate-bash.sh"
-        }
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/lint.sh"
+          }
+        ]
       }
     ]
   }

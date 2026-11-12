@@ -36,6 +36,22 @@ When you prompt "add user authentication to the API. Run `pytest tests/auth/` af
 
 The cost of adding verification criteria to a prompt is thirty seconds of typing. The cost of not adding them is measured in debugging time.
 
+Ask for evidence, not assertions. "Show me the test output" or "paste the command you ran and what it returned" is faster to review than re-running the check yourself, and it works for sessions you were not watching.
+
+### How Hard Should the Check Gate the Stop?
+
+Once a check exists, you choose how much authority it has. There are now four rungs, and each trades setup for attention:
+
+**In the prompt.** "Run the tests and iterate until they pass." Works on any task, today. But Claude is both the worker and the judge of when to stop.
+
+**As a goal.** `/goal all tests in test/auth pass and lint is clean` sets a session-scoped completion condition. After every turn, a separate, smaller model reads the conversation and judges whether the condition holds; if not, Claude starts another turn with the evaluator's reason as guidance. The goal clears when the condition is met, when the evaluator judges it impossible, or when an error you have to fix -- an expired login, an exhausted balance -- stops the run. Write conditions the transcript can demonstrate, because the evaluator does not run commands itself: one measurable end state ("`npm test` exits 0"), a stated way to prove it, and any constraints that must hold on the way ("no other test file modified"). Add a bound -- "or stop after 20 turns" -- for anything open-ended. Pair it with auto mode and both the per-action and the per-turn prompts disappear.
+
+**As a hook.** A Stop hook runs your check as a script and blocks the turn from ending until it passes (Chapter 6). Deterministic, applies to every session in its scope, and the only option that does not rely on a model's judgment at all.
+
+**As a second opinion.** A verification subagent, `/code-review`, or a dynamic workflow that cross-checks its own findings puts a fresh model on the job of refuting the result, so the agent that did the work is not the one grading it.
+
+The prompt version is enough for supervised work. The goal and the hook are what let an unattended run finish correctly without you.
+
 ## Specificity vs. Vagueness
 
 There is a time for vague prompts and a time for specific ones. Knowing which is which separates effective delegation from wasted cycles.
@@ -90,13 +106,15 @@ Each input modality adds context. Context costs tokens. But the right context --
 
 Claude Code is not a batch process. You can interrupt it mid-task.
 
-If Claude is heading in the wrong direction -- implementing a solution you do not want, using a library you do not use, modifying the wrong file -- type your correction and press Enter. Claude stops what it is doing, reads your correction, and adjusts course.
+If Claude is heading in the wrong direction -- implementing a solution you do not want, using a library you do not use, modifying the wrong file -- you have two moves. Press Escape and Claude stops the current response or tool call immediately, keeping the work done so far, ready for your redirect. Or just type your correction while it works: the message is queued and reaches Claude at the next opportunity, often within the running turn, without throwing away what is in flight. (Ctrl+Enter sends queued messages right away.)
 
 This is the real-time steering loop that makes agentic tools qualitatively different from one-shot generation. You are not waiting for the full output to review and reject. You are watching the work happen and redirecting in real time.
 
 Effective interruptions are specific: "stop -- use the existing database connection in config/db.ts instead of creating a new one." Vague interruptions ("that's wrong") force Claude to guess what you object to.
 
 The interrupt-and-steer pattern is most valuable during the first few minutes of a complex task, when Claude's initial approach reveals its assumptions. Correct the assumptions early and the rest of the implementation follows correctly.
+
+And know when steering has stopped working. If you have corrected Claude twice on the same issue, the context is now full of failed approaches that keep pulling it back. `/clear` and write a better first prompt that incorporates what you learned -- a clean session with a sharper prompt almost always beats a long session with accumulated corrections.
 
 ## Role Assignment Prompts
 
@@ -124,7 +142,7 @@ Spec-Driven Development follows a different flow: **Research, Spec, Refine, Task
 
 2. **Spec.** Ask Claude to write a comprehensive specification based on the research. "Your goal is to write a report. Produce a technical spec for the migration covering architecture, data model, error handling, and rollback strategy. Do not write any code yet." The spec becomes a file in the repository -- a persistent artifact that survives context compaction and session restarts.
 
-3. **Refine.** Before implementation, let Claude interview you about the spec using the AskUserQuestion tool: "Use the ask_user_question tool -- do you have any questions regarding the spec before we implement it?" Claude asks clarifying questions about ambiguities, design decisions, and edge cases. You answer. The spec is updated. This catches misunderstandings that would have become bugs.
+3. **Refine.** Before implementation, let Claude interview you about the spec using the AskUserQuestion tool: "Use the AskUserQuestion tool -- do you have any questions regarding the spec before we implement it?" Claude asks clarifying questions about ambiguities, design decisions, and edge cases. You answer. The spec is updated. This catches misunderstandings that would have become bugs.
 
 4. **Tasks.** Break the spec into atomic tasks, each implemented by a subagent with a fresh context. "Use the task tool. Each task should only be done by a subagent. After each task, do a commit." Each subagent reads the spec, implements one piece, commits, and returns. The main context stays lean -- it is orchestrating, not implementing.
 
@@ -138,7 +156,7 @@ The workflow relies on five specific prompt patterns that trigger the right beha
 
 2. **"Your goal is to write a report/document."** Forces Claude to produce a written artifact before any code. This becomes the source of truth.
 
-3. **"Use the ask_user_question tool before we implement."** Surfaces ambiguities and design decisions before they become bugs.
+3. **"Use the AskUserQuestion tool before we implement."** Surfaces ambiguities and design decisions before they become bugs.
 
 4. **"Use the task tool, and each task should only be done by a subagent. After each task, do a commit."** Forces atomic, independently verifiable units of work with commit boundaries.
 
@@ -160,9 +178,9 @@ The entire workflow took approximately forty-five minutes. The resulting code wa
 
 ### The AskUserQuestion Tool
 
-The refinement phase deserves special attention. When you tell Claude "use the ask_user_question tool before we implement," Claude enters an interview mode. It reads the spec and asks multiple-choice or open-ended questions about everything it is uncertain about. This is not the same as "ask me questions exhaustively" in freeform conversation. The AskUserQuestion tool provides structured, focused questions that are easier to answer and produce more actionable clarifications.
+The refinement phase deserves special attention. When you tell Claude "use the AskUserQuestion tool before we implement," Claude enters an interview mode. It reads the spec and asks multiple-choice or open-ended questions about everything it is uncertain about. This is not the same as "ask me questions exhaustively" in freeform conversation. The AskUserQuestion tool provides structured, focused questions that are easier to answer and produce more actionable clarifications.
 
-The interview pattern works well beyond spec refinement. Use it at the start of any complex task: "Before building anything, interview me about my requirements using the ask_user_question tool. Do not proceed until you have asked every question." The structured format surfaces assumptions that freeform conversation misses.
+The interview pattern works well beyond spec refinement. Use it at the start of any complex task: "Before building anything, interview me about my requirements using the AskUserQuestion tool. Do not proceed until you have asked every question." The structured format surfaces assumptions that freeform conversation misses.
 
 ## The Spec as Persistent Truth
 
@@ -282,19 +300,15 @@ The explicit "do not modify" for the similarly-named component is not paranoia. 
 
 The more ambiguous your codebase, the more specific your prompts need to be. Exact file paths, line numbers, function names, and explicit exclusions. The cost is a few extra seconds of typing. The benefit is Claude modifying exactly the right thing.
 
-## Extended Thinking Configuration
+## Effort, Not Thinking Budgets
 
-Claude Code's extended thinking mode allocates additional tokens for reasoning before generating a response. The thinking happens internally -- you see the result, not the reasoning process. For complex tasks that require deep analysis, extended thinking dramatically improves output quality. For simple tasks, it wastes tokens and time.
+The first edition explained extended thinking as a token budget you tuned with an environment variable. That model is now mostly history. Current models use *adaptive* reasoning: they decide how much to think per request, and the lever you hold is the **effort level**. On the newest models, thinking cannot be turned off at all.
 
-Three mechanisms control it:
+Effort runs `low`, `medium`, `high`, `xhigh`, and `max`, and the defaults vary by model -- the newest generation defaults to `medium`. Lower effort is faster and cheaper; higher effort reasons more deeply and spends more. Set it per session with `/effort` (or the slider in `/model`, or `--effort` at launch), persist it with the `effortLevel` setting, or pin it for a specific skill or subagent with an `effort:` field in its frontmatter. That last one is underused: a mechanical formatting agent at `low` and an architecture reviewer at `xhigh` can live in the same session.
 
-**Environment variables.** `MAX_THINKING_TOKENS` sets the budget for thinking tokens. The default is maximum (31,999 tokens). Set it lower (for example, `MAX_THINKING_TOKENS=10000`) to reduce cost on tasks that do not need deep reasoning, or set it to zero to disable thinking entirely. For the latest model with adaptive reasoning, thinking depth is controlled by effort level instead, and this variable is ignored unless set to zero.
+Here is the twist. The first edition carried a warning in bold: phrases like "ultrathink" are just words, and do not allocate more thinking. That was true. It is not anymore. `ultrathink` is now a recognized keyword -- put it in a prompt and that one turn runs at elevated effort, after which the session goes back to its normal setting. It is the right tool for the single hard question in an otherwise routine session. Other phrases ("think harder," "think hard") are still just words.
 
-`CLAUDE_CODE_EFFORT_LEVEL` sets the effort to `low`, `medium`, or `high` (default). Lower effort is faster and cheaper. Higher effort provides deeper reasoning. You can also adjust effort level interactively through the `/model` command using left/right arrow keys -- the change takes effect immediately.
-
-**Keyboard toggle.** `Alt+T` (or `Option+T` on Mac) toggles extended thinking on and off during a conversation. This requires running the terminal setup command first (`/terminal-setup`).
-
-**A critical misconception:** phrases like "think harder" or "ultrathink" in your prompt do not allocate more thinking tokens. They are just words in a prompt. The thinking budget is controlled entirely through the environment variables and the effort level setting. If you want Claude to reason more deeply, adjust the configuration -- do not add magic words to your prompt.
+Three related controls round this out. `MAX_THINKING_TOKENS` survives only for older models that used a fixed thinking budget. **Fast mode** (`/fast`, or Option+O / Alt+O) runs supported models faster at a higher price -- worth it when you are waiting on every turn. And the **advisor** pairs your session model with a stronger model that Claude consults only at hard decision points (Chapter 4). Before reaching for maximum effort on every turn, ask whether one hard turn (`ultrathink`) or a few hard decisions (the advisor) is what you actually need.
 
 ## Image and Screenshot Workflows
 
@@ -378,9 +392,9 @@ This pattern extracts institutional knowledge from conversations and persists it
 
 ## Progressive Disclosure in Skills
 
-A well-designed skill uses progressive disclosure to minimize context cost. Consider an analytics consultant skill: the skill directory contains a `skill.md` file with the skill definition and quick-start instructions, a `scripts/` directory with executable tools, and a `references/` directory with detailed documentation.
+A well-designed skill uses progressive disclosure to minimize context cost. Consider an analytics consultant skill: the skill directory contains a `SKILL.md` file with the skill definition and quick-start instructions, a `scripts/` directory with executable tools, and a `references/` directory with detailed documentation.
 
-When a user's prompt matches the skill's description, only the `skill.md` loads into context. When the skill runs, it calls the CLI tool in `scripts/`. Only when the tool needs detailed guidance does it read from `references/`. The full reference material never enters context unless needed. This design keeps the base context cost near zero while supporting arbitrarily complex operations.
+When a user's prompt matches the skill's description, only the `SKILL.md` loads into context. When the skill runs, it calls the CLI tool in `scripts/`. Only when the tool needs detailed guidance does it read from `references/`. The full reference material never enters context unless needed. This design keeps the base context cost near zero while supporting arbitrarily complex operations. Keep `SKILL.md` itself under about 500 lines; once loaded, a skill's body stays in context for the rest of the session and is re-attached after compaction, so it should read as standing instructions rather than one-time steps. And front-load the description: the listing Claude chooses from truncates long descriptions, so the words a request would actually contain belong in the first sentence.
 
 ## Two-Interface Planning
 
@@ -407,9 +421,13 @@ This is not the same as the general interrupt-and-steer pattern described earlie
 ## Key Takeaways
 
 - Verification criteria (tests, expected output, visual targets) are the single highest-leverage prompting technique -- they convert one-shot generation into iterative refinement.
+- Decide how hard the check gates the stop: in the prompt, as a `/goal` condition an evaluator re-checks every turn, as a Stop hook, or as a second-opinion reviewer.
 - Use vague prompts for exploration and specific prompts for implementation; the most common failure mode is vague implementation prompts.
 - Your linting configuration, type checker, and test suite are part of your prompt -- strict tooling creates backpressure that improves Claude's output automatically.
 - Ask Claude to plan before implementing; a 10,000-token plan prevents a 500,000-token misdirected implementation.
 - State constraints explicitly -- what cannot change, trade-off preferences, and flexibility boundaries -- because implicit constraints are invisible constraints.
 - Exhaustive questioning ("ask me questions exhaustively before starting") improves first-pass quality by 30-50% on complex tasks.
 - In ambiguous codebases, extreme specificity with exact file paths and explicit exclusions prevents wrong-component modifications.
+- Effort level, not a thinking budget, is the reasoning lever on current models; set it per session, per skill, or per subagent.
+- `ultrathink` now really does raise effort for a single turn -- use it for the one hard question instead of running the whole session at maximum.
+- Escape interrupts; typing while Claude works queues your correction. After two failed corrections, clear and re-prompt.

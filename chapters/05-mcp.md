@@ -4,43 +4,41 @@
 
 Model Context Protocol is how Claude Code reaches beyond the filesystem. It is the structured interface between an AI agent and everything else: databases, APIs, cloud services, market data feeds, internal tools, third-party platforms. Without MCP, Claude Code is capable but isolated -- a very smart process that can read files and run bash commands. With MCP, it becomes a node in your infrastructure.
 
-But MCP is not plug-and-play. Every MCP server you connect costs context tokens at session start. Connections fail silently mid-session. Tools disappear without warning. Background subagents cannot use MCP at all. The difference between an MCP integration that works and one that quietly degrades your session is configuration discipline, architectural awareness, and an honest understanding of what the protocol costs you.
+But MCP is not plug-and-play. The first edition of this book opened with a list of complaints: every server cost context tokens at session start, connections failed silently, tools vanished without warning, and background subagents could not use MCP at all. Most of that list has been fixed -- tool schemas now load on demand, remote servers reconnect on their own, and background subagents keep their MCP tools. What remains is subtler. A chatty tool can still flood your context with results. A project's `.mcp.json` can still connect a server you never vetted. And the structured, auditable interface that makes MCP valuable only pays off if you configure it with discipline.
 
-What follows is the mechanics of MCP in Claude Code: how tool loading works, what it costs, how to configure it for teams, where it breaks, and how practitioners have built production-scale integrations with dozens of tools. You will learn how to reference MCP resources with the `@server:resource` syntax, how managed settings control which servers your organization permits, and how hook patterns like `mcp__server__tool` enable fine-grained logging, validation, and transformation. You will see a sovereign wealth fund running MCP integrations across thousands of portfolio managers, a production trading platform with 41 MCP tools and sub-10ms GPU-accelerated inference, and a marketing team that built an MCP server for campaign analytics in days. When MCP is the right choice over raw bash, and what a real-world connector architecture looks like at scale.
+What follows is the mechanics of MCP in Claude Code: how tool loading works, what it costs, how to configure it for teams, where it breaks, how servers can now push events into a running session, and how practitioners have built production-scale integrations with dozens of tools. You will learn how to reference MCP resources with the `@server:resource` syntax, how managed settings control which servers your organization permits, and how hook patterns like `mcp__server__tool` enable fine-grained logging, validation, and transformation. You will see a sovereign wealth fund running MCP integrations across thousands of portfolio managers, a production trading platform with 41 MCP tools and sub-10ms GPU-accelerated inference, and a marketing team that built an MCP server for campaign analytics in days. When MCP is the right choice over raw bash, and what a real-world connector architecture looks like at scale.
 
 ---
 
 ## How MCP Tool Loading Works
 
-When a Claude Code session starts, every configured MCP server connects and exposes its tool definitions. These definitions -- names, descriptions, parameter schemas -- load into the context window immediately. This is the cost of MCP: you pay context tokens for every tool definition before you use any of them.
+When a Claude Code session starts, every configured MCP server connects and announces its tools. In the early days, every tool's full definition -- name, description, parameter schema -- loaded into the context window immediately, and you paid for all of them on every request whether you used them or not.
 
-The tool search system mitigates this. Enabled by default, it loads tool definitions for up to roughly 10% of context capacity directly. The rest are deferred -- their descriptions are indexed but their full schemas are not held in context until Claude determines it needs them. When Claude encounters a task that might require a deferred tool, it searches the index, loads the relevant schema, and proceeds.
+Tool search changed the economics. It is now on by default: at startup Claude sees each server's instructions and the *names* of its tools, and the full schema for a tool is fetched only when Claude decides it needs that tool. Connect ten servers with two hundred tools between them and the idle cost is a list of names. This is the reason MCP can now scale to dozens of servers without crowding out your work.
 
-This deferred loading is the reason MCP can scale to dozens of servers without immediately consuming your entire context window. But it introduces a subtle cost: the search step itself uses context and adds latency. For tools you know you will use every session, eager loading is better. For a catalog of 40 tools where you use 5 per session, deferred loading is essential.
-
-You can control this with the `ENABLE_TOOL_SEARCH` environment variable. Disabling it forces all tool definitions to load eagerly, which is fine if you have a small number of MCP servers and want zero search latency. It is catastrophic if you have many servers with extensive tool catalogs.
+The search step is not free -- it adds a round trip the first time a tool is used -- but for any realistic catalog it is overwhelmingly the right default. The one place it historically switched itself off was behind a custom API gateway that did not forward the needed request blocks; current versions try it there too and fall back automatically if the gateway rejects it. (`ENABLE_TOOL_SEARCH=true` forces it on for a proxy you know forwards them.)
 
 ### Measuring Your MCP Context Cost
 
-The `/mcp` slash command shows per-server token costs. Run it. If your MCP servers are consuming 15% of your context window before you type a single prompt, you have a configuration problem. Either reduce the number of connected servers, or ensure tool search is deferring most of them.
+`/context all` breaks your context down to the token cost of each loaded MCP tool. `/usage`, on a subscription plan, attributes recent consumption to individual MCP servers -- counting only the requests that actually consumed one of that server's results. Between the two, you can see both what a server costs to have connected and what it costs to use.
 
-The context cost is not just the tool definitions. Each tool's JSON schema -- parameter types, descriptions, enums, nested objects -- adds up. A well-documented MCP tool with rich parameter descriptions costs more context than a terse one. If you are building MCP servers for your team, keep schemas precise but concise. Every word in a parameter description is a token Claude pays for on every request.
+With definitions deferred, the expensive part of MCP is now the *results*. A tool that returns a 40,000-token JSON blob costs 40,000 tokens every time it is called. Claude Code warns when a tool result exceeds 10,000 tokens and caps results at 25,000 by default (`MAX_MCP_OUTPUT_TOKENS` raises the cap; a server can declare a larger limit for an individual tool, up to 500,000). Very large text results are saved to a file and Claude reads only what it needs. If you are building MCP servers for your team, the lesson inverts from the first edition: keep schemas clear, and spend your discipline on returning compact, filtered results.
 
 ## MCP Resources
 
 MCP servers can expose not just tools but also resources -- structured data that you reference using `@` mentions, the same way you reference files. The syntax is `@server:protocol://resource/path`:
 
 ```
-> Can you analyze @github:issue://123 and suggest a fix?
+> Can you analyze @tracker:issue://123 and suggest a fix?
 
 > Please review the API documentation at @docs:file://api/authentication
 
-> Compare @postgres:schema://users with @docs:file://database/user-model
+> Compare @db:schema://users with @docs:file://database/user-model
 ```
 
 Type `@` in your prompt to see available resources from all connected MCP servers. Resources appear alongside files in the autocomplete menu. When you reference a resource, it is fetched automatically and included as an attachment in the conversation.
 
-This matters because it puts external data on the same footing as local files. Instead of asking Claude to "use the database MCP tool to fetch the users table schema," you reference it directly as `@postgres:schema://users` and it appears in context. Multiple resources can be referenced in a single prompt. The model sees them as structured inputs, not as tool call outputs, which often produces better responses because the data is present before reasoning begins rather than being fetched mid-conversation.
+This matters because it puts external data on the same footing as local files. Instead of asking Claude to "use the database MCP tool to fetch the users table schema," you reference it directly as `@db:schema://users` and it appears in context. Multiple resources can be referenced in a single prompt. The model sees them as structured inputs, not as tool call outputs, which often produces better responses because the data is present before reasoning begins rather than being fetched mid-conversation.
 
 ## Centralized Configuration
 
@@ -60,7 +58,19 @@ MCP servers are configured in `.mcp.json` at the project root. This file should 
 }
 ```
 
-Environment variable interpolation lets the configuration reference credentials without embedding them. The `.mcp.json` file contains the structure; actual secrets live in each developer's environment.
+Environment variable interpolation -- `${VAR}`, or `${VAR:-default}` -- lets the configuration reference credentials without embedding them. The `.mcp.json` file contains the structure; actual secrets live in each developer's environment. One defensive detail: in a remote server's URL and headers, variables holding Claude Code's own credentials read as empty, so a project cannot name a server that quietly receives your API key.
+
+### Transports and Scopes
+
+Three transports matter. **HTTP** is the recommended choice for remote servers (`claude mcp add --transport http notes https://...`). **stdio** runs a local process (`claude mcp add --transport stdio name -- command args`). The older server-sent-events transport is deprecated; current versions try HTTP first and fall back. WebSocket servers can be configured in JSON.
+
+Servers live at three scopes. **Local** (the default) is stored in your user configuration but applies only to the current project. **Project** is the committed `.mcp.json`. **User** applies to every project. When two scopes define the same name, local beats project beats user, which beats plugin-provided servers and connectors from your Claude account. Organization-provided servers rank above all of them.
+
+Authentication for remote servers is OAuth. Complete it from the `/mcp` panel inside a session, or from the shell with `claude mcp login <name>` (and `claude mcp logout` to clear stored credentials) -- the shell form works over SSH, where it prints the authorization URL instead of opening a browser. For servers that need short-lived tokens, a `headersHelper` command generates headers at connection time and is re-run when the server rejects a request.
+
+### Connectors from Your Claude Account
+
+If you use connectors in the Claude apps, they are available in Claude Code too, at the lowest precedence. That has a practical upside -- one sign-in on the web and the connector works in your terminal, in cloud sessions, and in published artifacts -- and a governance implication: your organization's connector policy now reaches your coding sessions. Connectors an administrator marks as "ask" always prompt, whatever permission mode you are in.
 
 ### Managed MCP: Allowlists, Denylists, and Auto-Approval
 
@@ -72,29 +82,33 @@ Three user-level settings control the approval flow for project-defined MCP serv
 
 **`enableAllProjectMcpServers`** automatically approves all MCP servers in project `.mcp.json` files. Set this to `true` when you trust the repositories you work in and want zero friction. Set it to `false` (the default) when you want to approve each server individually.
 
-**`enabledMcpjsonServers`** is a list of specific server names to auto-approve: `["memory", "github"]`. Servers on this list connect without prompting. Servers not on this list still prompt for approval.
+**`enabledMcpjsonServers`** is a list of specific server names to auto-approve: `["memory", "tracker"]`. Servers on this list connect without prompting. Servers not on this list still prompt for approval.
 
 **`disabledMcpjsonServers`** is a list of specific servers to reject: `["filesystem"]`. Servers on this list never connect, even if the project `.mcp.json` defines them.
 
-These settings matter for organizational deployment. A team can commit `.mcp.json` to version control with all the servers the project needs, then configure managed settings to allowlist those servers and denylist everything else. New team members clone the repo, get the MCP configuration automatically, and the managed settings ensure no rogue servers connect.
+These settings matter for organizational deployment. A team can commit `.mcp.json` to version control with all the servers the project needs, then configure managed settings to allowlist those servers and denylist everything else. New team members clone the repo, get the MCP configuration automatically, and the managed settings ensure no rogue servers connect. Two newer controls round this out: managed configuration can *provide* servers to every user rather than merely permit them, and a managed MCP file can take exclusive control so that no other configuration source is read at all.
+
+One trust caveat. In an untrusted folder, approvals committed to the project's settings are ignored and the server waits at "pending approval" until you trust the workspace. But in a non-interactive `-p` run there is no approval prompt, so a repository's `.mcp.json` servers connect without asking. When scripting over repositories you did not write, use `--strict-mcp-config` with your own `--mcp-config`, or `--bare`. And if you change your mind about a project's servers, `claude mcp reset-project-choices` clears your earlier approvals.
 
 ## Where MCP Breaks
 
 MCP connections are not as reliable as local tool calls. Understanding the failure modes prevents confusion when things go silent.
 
-### Silent Disconnection
+### Disconnection
 
-An MCP server can disconnect mid-session. When it does, the tools it provided simply disappear. Claude Code does not throw an error. It does not notify you. The tools are just gone. If Claude was relying on a tool from that server, it will either fail to find it or attempt a fallback strategy that may not be what you wanted.
+An MCP server can disconnect mid-session. For remote servers this is now mostly self-healing: Claude Code retries a dropped HTTP connection up to five times with exponential backoff, and retries a failed first connection a few times before giving up. Local stdio servers that crash are the remaining hazard -- they do not restart on their own, and their tools are simply gone until you reconnect them from `/mcp`.
 
-The symptom is subtle: Claude stops using a capability it was using moments ago, or it starts doing something manually that it was doing through a tool. If Claude suddenly begins writing raw HTTP requests instead of using your API connector, check your MCP connections.
-
-The `/mcp` command shows current connection status. Make it a reflex when behavior changes unexpectedly.
+The symptom is still subtle: Claude stops using a capability it was using moments ago, or it starts doing something manually that it was doing through a tool. If Claude suddenly begins writing raw HTTP requests instead of using your API connector, check your MCP connections. `/mcp` shows current connection status; `/mcp reconnect all` retries every failed server in one step. Make it a reflex when behavior changes unexpectedly.
 
 ### Server Startup Failures
 
-MCP servers can fail to start when a session begins. A missing dependency, a bad environment variable, a port conflict -- any of these can prevent a server from initializing. Claude Code will start the session without those tools, and you may not notice their absence until you need them.
+MCP servers can fail to start when a session begins. A missing dependency, a bad environment variable, a port conflict -- any of these can prevent a server from initializing. Claude Code will start the session without those tools, and you may not notice their absence until you need them. Slow servers are less of a problem than they were: servers can finish connecting in the background, and Claude can wait for a still-connecting server when a request needs its tools.
 
-The diagnostic path: run `/mcp` at session start. Confirm all expected servers are connected and their tool counts match expectations. This takes five seconds and prevents thirty minutes of confusion.
+The diagnostic path: run `/mcp` at session start, or `claude mcp list` from the shell. Confirm all expected servers are connected and their tool counts match expectations. In scripted runs, the session's initial metadata event lists each server's status and any configuration entries that were skipped as invalid -- a CI job can fail fast on a non-empty error list instead of discovering the missing tool twenty minutes in. This takes five seconds and prevents thirty minutes of confusion.
+
+### Long-Running Calls
+
+A tool call that is still running after two minutes in the main conversation now moves to the background on its own, so a slow query no longer freezes the session. The result arrives when it is ready. Servers that support it can also run tasks on the server side that survive the session; resume the session to pick the result back up.
 
 ### Tools with Identical Names
 
@@ -102,13 +116,9 @@ If two MCP servers expose tools with the same name, behavior is undefined. One w
 
 ## MCP in Subagents
 
-MCP tools are available in foreground subagents but not background subagents. This is a hard architectural constraint, not a configuration option.
+The first edition called this "a hard architectural constraint, not a configuration option": background subagents could not use MCP tools. That constraint is gone. Background subagents -- now the default (Chapter 4) -- keep their MCP tools, and when one needs a permission to call a tool, the prompt surfaces in your main session instead of being auto-denied.
 
-Background subagents run concurrently and cannot interact with the user. MCP servers may require interactive authentication, may have rate limits that conflict with parallel access, and may produce output that needs human review. Rather than introducing partial support with unpredictable behavior, the constraint is binary: foreground gets MCP, background does not.
-
-The practical impact: if you are designing a workflow where subagents need to query external services, those subagents must run in the foreground. As covered in Chapter 4, this affects your parallelism strategy -- foreground subagents block the main conversation.
-
-The workaround for background subagents that need external data: have the main agent fetch the data via MCP first, then pass the results to the background subagent as part of its task description. This trades real-time data access for parallelism.
+What remains is scoping. A custom subagent's `mcpServers` field decides which servers it can reach, so a database-reader agent gets the database server and a code reviewer gets none. In its `tools` list, `mcp__db__*` grants one server's tools; in `disallowedTools`, `mcp__*` withholds them all. The old workaround -- fetch the data in the main session and hand it to the worker -- is still useful, but now for a different reason: when twenty parallel workers would each hit the same rate-limited API, one fetch is kinder to the server than twenty.
 
 ## MCP in Plugins
 
@@ -116,7 +126,7 @@ Plugins can bundle MCP server configurations that auto-start when the plugin is 
 
 This is the distribution mechanism for MCP. Rather than asking every team member to configure MCP servers manually, a plugin packages the server binary, its configuration, and the auto-start logic into something that activates with a single enablement step.
 
-The auto-start behavior means plugin MCP servers consume context from the moment the plugin is active. Disabling an unused plugin recovers that context. If you are running tight on context budget, audit which plugins are active and whether their MCP tools are actually being used.
+Plugin MCP servers start with every session where the plugin is enabled. With tool search their idle context cost is small, but they are still processes running on your machine with your permissions. The `/plugin` manager's stats and `/usage` attribution show which plugins actually get used; disable the rest. Note the naming: a plugin's tools are namespaced as `mcp__plugin_<plugin>_<server>__<tool>`, and permission rules and hook matchers must use that full form.
 
 ## MCP Tool Hooks
 
@@ -124,7 +134,9 @@ Hooks interact with MCP tools through a naming convention: `mcp__servername__too
 
 A hook matching `mcp__analytics__.*` intercepts every tool from your analytics MCP server. A hook matching `mcp__.*__write.*` intercepts any write operation across all MCP servers. A hook matching `mcp__memory__.*` catches all operations on a memory server specifically. The pattern matching is flexible enough to express server-level, tool-level, or cross-server policies.
 
-The double-underscore convention (`mcp__server__tool`) is not arbitrary -- it is the exact format Claude Code uses internally to namespace MCP tools. When Claude calls a tool from your analytics server named `get_price_history`, the internal tool name is `mcp__analytics__get_price_history`. Your hook matcher targets this full namespaced name, which means you can write hooks that distinguish between tools of the same name on different servers.
+The double-underscore convention (`mcp__server__tool`) is not arbitrary -- it is the exact format Claude Code uses internally to namespace MCP tools. When Claude calls a tool from your analytics server named `get_price_history`, the internal tool name is `mcp__analytics__get_price_history`. Your hook matcher targets this full namespaced name, which means you can write hooks that distinguish between tools of the same name on different servers. Permission rules follow the same names, with one precision worth knowing: a rule names one server exactly, so `mcp__analytics__*` will not accidentally cover a server called `analytics_v2`.
+
+The relationship now runs both ways. A hook can itself *be* an MCP call: the `mcp_tool` handler type invokes a tool on a configured server when an event fires, which is the natural shape for sending every tool invocation to an audit service that already speaks MCP. And when a server asks the user for input mid-call -- an elicitation -- the Elicitation hook can answer it programmatically, which is what lets such servers work in unattended runs.
 
 ### Logging
 
@@ -134,7 +146,7 @@ For regulated industries, this is not optional. If your MCP servers connect to f
 
 ### Transformation
 
-PostToolUse hooks can transform MCP tool output before Claude processes it. This is useful when an MCP tool returns more data than Claude needs. A hook that filters a large API response to the relevant fields reduces context consumption and improves Claude's ability to focus on what matters.
+PostToolUse hooks can transform MCP tool output before Claude processes it, by returning a replacement result. This is useful when an MCP tool returns more data than Claude needs. A hook that filters a large API response to the relevant fields reduces context consumption and improves Claude's ability to focus on what matters.
 
 The opposite transformation is also valuable: enriching sparse MCP output with additional context. A hook that appends metadata or formatting to a tool's output can improve Claude's interpretation without modifying the MCP server itself.
 
@@ -143,6 +155,14 @@ The opposite transformation is also valuable: enriching sparse MCP output with a
 PreToolUse hooks on MCP tools can enforce input validation before the request reaches the external service. A hook that checks whether a database query MCP tool is receiving a SELECT statement (allowed) versus a DROP TABLE statement (denied) prevents catastrophic mistakes without modifying the MCP server's code.
 
 This is defense in depth. The MCP server should have its own input validation. The hook is a second layer that catches what the server might not.
+
+## Channels: When the Server Talks First
+
+Every MCP interaction described so far starts with Claude. Claude decides to call a tool; the server answers. Channels reverse the direction. A server that declares the channel capability can *push* a message into a running session -- a CI failure, a chat message, a monitoring alert, a webhook -- and Claude reacts to it as a new turn, even while you are away.
+
+Start a session with `--channels` naming the channel plugins to listen to. A channel can also expose a reply tool, so Claude can answer back through the same pipe: a chat message arrives asking why the nightly build failed, Claude investigates and replies in the thread. Channel plugins gate who can send, and permission prompts can be relayed out through the channel so a human can approve from wherever the message came from.
+
+This turns a running session into something closer to an on-call engineer than a tool: it sits idle, costs nothing, and wakes up when the event it was waiting for arrives. It is still a research preview, and only allowlisted channels load by default. The polling alternative -- `/loop` checking a status every few minutes -- works everywhere, but every poll re-sends your full context. A channel only spends tokens when something actually happens.
 
 ## Domain-Specific Connector Patterns
 
@@ -195,7 +215,7 @@ The ceiling of what is possible with MCP integration is visible in a production 
 - **Risk management**: position sizing, drawdown analysis, correlation monitoring
 - **News and sentiment**: real-time news analysis and sentiment scoring
 
-The neural forecasting engine runs state-of-the-art time series models with sub-10ms prediction latency, GPU-accelerated with a 6,250x speedup via CUDA optimization. Claude Code generated the forecasting engine code and the MCP integration layer. The MCP tools provide the structured interface between Claude's reasoning and the GPU-accelerated inference -- Claude decides what to predict and how to act on predictions, while the heavy numerical computation runs server-side where GPU acceleration matters.
+The neural forecasting engine runs state-of-the-art time series models with sub-10ms prediction latency, GPU-accelerated with a 6,250x speedup via custom GPU kernel optimization. Claude Code generated the forecasting engine code and the MCP integration layer. The MCP tools provide the structured interface between Claude's reasoning and the GPU-accelerated inference -- Claude decides what to predict and how to act on predictions, while the heavy numerical computation runs server-side where GPU acceleration matters.
 
 At this scale, every configuration discipline described earlier in this chapter becomes mandatory. Server-per-domain grouping isolates failures. Deferred loading prevents context exhaustion. Naming conventions keep 41 tools navigable. Health monitoring catches disconnections before they cascade.
 
@@ -233,7 +253,7 @@ With MCP, credentials are server-side. Access is structured. Logging is automati
 
 A recurring architecture in production MCP deployments uses Go for the heavy computation and JavaScript for the MCP server interface. The rationale is practical and practitioner-motivated: Go handles concurrent data processing, complex algorithms, and performance-sensitive operations. JavaScript is what Claude Code writes most fluently when generating MCP server code.
 
-One practitioner described the reasoning bluntly: Go for heavy lifting because of existing infrastructure expertise, JavaScript for the MCP server because it is the easiest language for Claude to write. The architecture works like this: the Go backend exposes a local API (HTTP or gRPC). The JavaScript MCP server translates between MCP protocol and the Go API. Claude interacts with the MCP server; the MCP server delegates to Go.
+One practitioner described the reasoning bluntly: Go for heavy lifting because of existing infrastructure expertise, JavaScript for the MCP server because it is the easiest language for Claude to write. The architecture works like this: the Go backend exposes a local API (HTTP or a binary RPC protocol). The JavaScript MCP server translates between MCP protocol and the Go API. Claude interacts with the MCP server; the MCP server delegates to Go.
 
 The token-saving angle is significant. A codebase analysis tool built with this architecture reported 80-90% token savings compared to having Claude analyze code directly. The Go backend does the heavy parsing and analysis, returning structured results through the MCP server. Claude receives pre-digested information rather than raw source files, consuming a fraction of the context.
 
@@ -254,9 +274,9 @@ Production deployments exist with over 40 MCP tools across multiple servers. At 
 The patterns that make large integrations work:
 
 - **Server-per-domain grouping**: One MCP server per data domain or service. Analytics tools on one server, portfolio tools on another, backtesting tools on a third. This makes failures isolated -- a crashed analytics server does not take down portfolio management.
-- **Deferred loading by default**: With 40+ tools, eager loading would consume a prohibitive fraction of context. Tool search must be enabled.
+- **Deferred loading by default**: With 40+ tools, eager loading would consume a prohibitive fraction of context. Tool search, now the default, handles this -- just make sure nothing in your environment turns it off.
 - **Naming conventions**: Every tool prefixed with its domain: `analytics_price_history`, `portfolio_current_holdings`, `backtest_run_strategy`. Claude can reason about tool selection better when names are self-documenting.
-- **Minimal schemas**: Each tool's parameter schema describes exactly what is needed and nothing more. Rich descriptions go in a skill or CLAUDE.md reference, not in the schema that loads into context every session.
+- **Minimal schemas and compact results**: Each tool's parameter schema describes exactly what is needed and nothing more, and each result returns only what Claude needs. Rich usage guidance goes in a skill that teaches Claude how to use the tools well, not in schema descriptions that load every time a tool is fetched.
 - **Health monitoring**: A startup hook or script that verifies all MCP servers are responding before beginning work. Thirty seconds of verification prevents an hour of debugging why tools are missing.
 
 ## MCP Over CLI for Data Security
@@ -291,13 +311,16 @@ The pattern is: classify your data first, then choose the access architecture ba
 
 ## Key Takeaways
 
-- Every MCP tool definition costs context tokens at session start; use `/mcp` to measure and tool search to defer what you do not need immediately.
+- Tool search is on by default: idle MCP servers cost little more than a list of tool names. The expensive part of MCP is now tool *results* -- design servers that return compact, filtered output.
+- `/context all` and `/usage` show what each server costs to keep connected and to use.
 - MCP resources (`@server:resource` syntax) put external data on the same footing as local files, enabling direct references in prompts.
-- MCP connections fail silently -- run `/mcp` at session start and whenever Claude's behavior changes unexpectedly.
-- Background subagents cannot use MCP tools; design workflows accordingly or pre-fetch data in the main agent.
-- Hook patterns like `mcp__server__tool` enable logging, validation, and transformation of MCP tool invocations; the double-underscore naming is the exact internal format Claude Code uses.
+- Use HTTP for remote servers, stdio for local ones; scopes resolve local, then project, then user, then plugins and account connectors, with organization-provided servers above all. Authenticate from the shell with `claude mcp login`.
+- Remote servers reconnect on their own; crashed local servers do not. `/mcp` and `/mcp reconnect all` are your first moves when Claude's behavior changes unexpectedly.
+- Background subagents now keep their MCP tools; scope which servers each agent can reach with `mcpServers` and exact-server permission rules.
+- Channels let a server push events into a running session, so Claude can react to CI failures, chat messages, and alerts without polling.
+- Hook patterns like `mcp__server__tool` enable logging, validation, and transformation of MCP tool invocations; hooks can also call MCP tools directly and answer server elicitations.
 - MCP servers keep credentials out of Claude's context, making them categorically more secure than equivalent bash commands for sensitive data access.
-- Managed settings (`enableAllProjectMcpServers`, `enabledMcpjsonServers`, `disabledMcpjsonServers`) control server approval at the user level; `allowedMcpServers` and `deniedMcpServers` enforce policy at the organizational level.
+- Managed settings control which servers are allowed, denied, or provided to everyone; remember that `-p` runs connect a repository's `.mcp.json` without asking.
 - Commit `.mcp.json` to version control so one person's configuration effort benefits the entire team.
 - The three-layer architecture (AI creation, visual display, no-code refinement) minimizes token costs by restricting AI to the ideation phase, with MCP providing structured data access in that layer.
 - At scale (40+ tools), server-per-domain grouping, deferred loading, and strict naming conventions prevent context bloat and tool collisions.

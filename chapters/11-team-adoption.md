@@ -34,11 +34,15 @@ Plan mode is the training wheels for full autonomy. It separates "does Claude un
 
 ### Stage 4: Full Autonomy
 
-With experience from the first three stages, developers have calibrated their expectations. They know which tasks Claude handles well, which require close supervision, and which are better done manually. They use auto-accept mode for appropriate tasks. They delegate multi-file changes. They run background subagents for parallel work.
+With experience from the first three stages, developers have calibrated their expectations. They know which tasks Claude handles well, which require close supervision, and which are better done manually. They let auto mode handle routine approvals, write deny rules for what must never happen, delegate multi-file changes, and dispatch background sessions for parallel work.
+
+A note on the defaults: auto mode is now where an interactive session starts, which means a brand-new user experiences something closer to Stage 4 permissions on day one. The guided path still matters -- but it is now about calibrating *judgment* (what to delegate, how to verify) rather than calibrating permission prompts. Teams that want new users to start supervised can set a default mode in managed settings, or disable auto mode for the organization entirely.
 
 The progression typically takes two to four weeks per developer. Attempting to skip stages -- jumping from installation to full autonomy -- produces the uneven results that make teams give up.
 
 The `/init` command accelerates Stage 1. Running it in a repository analyzes the codebase to detect build systems, test frameworks, and code patterns, then generates a starter CLAUDE.md file. For teams onboarding multiple developers simultaneously, `/init` provides a consistent starting point that captures the codebase's essential structure without requiring anyone to write the initial documentation by hand. It is not a substitute for the team's accumulated knowledge -- that comes from the progressive stages above -- but it eliminates the blank-page problem for day one.
+
+Two newer commands work from the other direction. `/team-onboarding` has an experienced user's Claude analyze the last month of their sessions -- commands, skills, MCP servers they rely on -- and produce an onboarding guide a new teammate can paste as their first message to get set up the same way. And `/powerup` walks a new user through features with short interactive lessons. Anthropic also publishes a communications kit and a champion kit for organizations rolling Claude Code out: announcement templates, FAQ answers, and a playbook for the engineers who end up evangelizing it internally.
 
 ## Shared CLAUDE.md
 
@@ -62,23 +66,27 @@ Do not commit personal preferences. Those belong in user-level configuration or 
 
 Enterprise adoption requires policy enforcement. Managed settings provide this through a configuration layer that cannot be overridden by any other scope, as detailed in Chapter 2.
 
-The `managed-settings.json` file, deployed to system directories by IT, enforces organizational policies:
+Managed settings now arrive by three routes. A `managed-settings.json` file deployed to a system directory. Device-management policy pushed by your endpoint tooling, optionally computed at startup by a policy helper program. Or server-managed settings, configured in the organization's admin console and delivered when a developer signs in -- no device management infrastructure required. Claude Code combines the managed sources it finds. Whatever the route, the layer enforces organizational policies:
 
-- Which tools Claude Code may use
-- Which permissions are always denied
-- Which MCP servers are allowed or blocked
-- Whether hooks can be defined outside the managed scope
-- Which plugin marketplaces are trusted
+- Which tools and commands Claude Code may use, and which permissions are always denied
+- Whether auto mode and bypass mode are available, and what the classifier treats as trusted infrastructure
+- Which MCP servers are allowed, blocked, or provided to everyone
+- Whether hooks, mods, and permission rules can be defined outside the managed scope
+- Which plugin marketplaces are trusted, and which plugins are force-installed
+- Which models are available, the maximum effort level, and the rates used to report cost
+- Which Claude Code versions are allowed to run at all
 
-These settings are invisible to developers in the sense that they cannot inspect or modify them from the Claude Code CLI. A developer who finds that a capability is unavailable may not immediately know whether it is a configuration issue or a managed policy. This is intentional -- security policies should not be negotiable through developer tooling.
+Developers cannot modify these settings, and a capability blocked by policy simply is not there. But they are no longer invisible: `/status` shows whether managed settings are in effect and where they came from. This is the right balance -- security policies should not be negotiable through developer tooling, but they should not be a mystery either.
 
 ### The Configuration Gap
 
-The gap between "it works on my personal machine" and "it does not work at the office" is almost always managed settings. If you are helping a team adopt Claude Code in an enterprise environment, verify managed settings early. The most elegant project configuration is irrelevant if the managed layer overrides it.
+The gap between "it works on my personal machine" and "it does not work at the office" is almost always managed settings. If you are helping a team adopt Claude Code in an enterprise environment, verify managed settings early -- `/status` on a developer machine tells you in seconds. The most elegant project configuration is irrelevant if the managed layer overrides it.
 
 ## Plugin Marketplaces
 
-Plugins package skills, agents, hooks, MCP servers, and LSP configurations into distributable bundles. For teams, the marketplace system provides controlled distribution.
+Plugins package skills, agents, hooks, MCP servers, language servers, output styles, themes, workflows, and mods into distributable bundles. A marketplace is just a catalog file in a repository that lists plugins and where to fetch each one. Claude Code adds Anthropic's official marketplace automatically on first run; everything else, including your organization's own, is added explicitly. For teams, the marketplace system provides controlled, versioned distribution.
+
+The plugin system matured considerably. Plugins can declare dependencies on other plugins with version ranges, which are installed and pruned automatically. `claude plugin eval` runs a plugin against a suite of test cases, grades the results, and compares against a no-plugin baseline -- so you can gate a plugin's release in CI on whether it actually helps. A plugin's context cost and usage are measurable, and the plugin manager flags installed plugins nobody has used recently. And skills dropped into a `.claude/skills/` directory load automatically, no marketplace required, which keeps the plugin for when you genuinely need packaging.
 
 ### Private Marketplaces
 
@@ -88,9 +96,13 @@ A team might build a plugin that bundles their internal MCP servers, project-spe
 
 ### Marketplace Restrictions
 
-The `strictKnownMarketplaces` setting in managed configuration restricts plugin installation to approved marketplace sources. This prevents developers from installing plugins from arbitrary URLs or repositories -- a security measure that prevents supply chain attacks through the plugin system.
+Managed configuration can allowlist or block marketplaces, force-install and require specific plugins, and turn off session-only loading from a directory or URL. This prevents developers from installing plugins from arbitrary repositories -- a security measure against supply chain attacks through the plugin system, which matters because a plugin runs as the developer, with the developer's credentials.
 
-When strict marketplace enforcement is active, Claude Code verifies the plugin source against the allowlist before any network request or filesystem operation. An unapproved marketplace source is not just blocked -- it is never contacted.
+Marketplace names carry trust tiers. Anthropic's official and community marketplace names are honored only when they come from Anthropic's own repositories, so a third-party catalog cannot impersonate them; everything else, including your organization's own, is third-party. An organization can also add a relevance block to entries in its marketplace so Claude Code *suggests* the right plugin when a developer's work matches it -- discovery without a mandate.
+
+### Mods: Governance for Code That Runs Inside Claude Code
+
+Mods -- plugins whose hooks are JavaScript functions running inside Claude Code (Chapter 2) -- get their own controls. Administrators can stop user-installed mods from loading, allow only the organization's own, and review what any mod can do from the static listing `claude plugin validate` produces. A built-in guard mod keeps user-installed mods from overriding what the organization manages, and an organization can enforce its own policy *with* a mod. No other extension point reaches as deep into Claude Code, and none deserves stricter review.
 
 ## Shared Project Settings via VCS
 
@@ -132,7 +144,7 @@ Different team functions get different value from Claude Code. Recognizing this 
 
 ### Product Managers
 
-Product managers typically use Claude Code for natural language tasks: writing specifications, generating documentation, analyzing requirements. Their interaction is conversational. They rarely use auto-accept mode or autonomous execution. Plan mode is their primary workflow -- they review and refine rather than implement.
+Product managers typically use Claude Code for natural language tasks: writing specifications, generating documentation, analyzing requirements. Their interaction is conversational. They rarely use auto mode or autonomous execution. Plan mode is their primary workflow -- they review and refine rather than implement.
 
 ### Backend Engineers
 
@@ -196,9 +208,9 @@ One of their distinctive practices is monitoring at scale. Claude Code processes
 
 The product development team manages core platform capabilities and agentic functionality. They operate in two distinct modes, and the choice between them is deliberate.
 
-For prototyping and peripheral features, they use auto-accept mode to set up autonomous loops. Claude writes code, runs tests, iterates continuously, and the engineer reviews the roughly eighty-percent-complete solution before taking over for final refinements. For core business logic and critical features, they work synchronously, giving detailed prompts and monitoring Claude's output in real time to ensure code quality, style guide compliance, and proper architecture.
+For prototyping and peripheral features, they use auto mode to set up autonomous loops. Claude writes code, runs tests, iterates continuously, and the engineer reviews the roughly eighty-percent-complete solution before taking over for final refinements. For core business logic and critical features, they work synchronously, giving detailed prompts and monitoring Claude's output in real time to ensure code quality, style guide compliance, and proper architecture.
 
-The split matters. One of their most successful async projects involved a complex feature implementation where roughly seventy percent of the final code came from Claude's autonomous work, requiring only a few iterations to complete. Their task classification rubric is worth replicating: tasks on the product's edges (peripheral features, prototyping, exploratory code) go into auto-accept mode. Tasks touching core functionality get synchronous supervision with detailed prompts. Learning to make this distinction quickly is itself a skill that develops over weeks.
+The split matters. One of their most successful async projects involved a complex feature implementation where roughly seventy percent of the final code came from Claude's autonomous work, requiring only a few iterations to complete. Their task classification rubric is worth replicating: tasks on the product's edges (peripheral features, prototyping, exploratory code) go to auto mode and run unattended. Tasks touching core functionality get synchronous supervision with detailed prompts. Learning to make this distinction quickly is itself a skill that develops over weeks.
 
 ### Security Engineering
 
@@ -266,9 +278,11 @@ The reinforcement learning team uses a "try and rollback" methodology. They comm
 
 Custom slash commands encode team-specific workflows as single invocations. One security-focused team accounts for half of all custom slash commands in their organization's monorepo -- an indicator of how deeply slash commands can embed into team practice.
 
-Examples of team-specific slash commands:
+Mechanically, custom commands and skills have merged. A file in `.claude/commands/` and a skill directory in `.claude/skills/` both create a `/name` command, and existing command files keep working. New team conventions should be written as skills: they can carry supporting files and scripts, control whether Claude may invoke them on its own (`disable-model-invocation: true` for anything with side effects), pre-approve the tools they need, and load automatically when relevant. A team skill with the same name as a built-in command replaces it for that project -- useful for a house version of code review.
 
-- `/security-review` -- Runs a security-focused code review with the team's specific checklist.
+Examples of team-specific commands:
+
+- `/security-checklist` -- Runs a security-focused review with the team's specific checklist, on top of the built-in `/security-review`.
 - `/migration-plan` -- Generates a database migration plan following the team's conventions.
 - `/deploy-checklist` -- Walks through the pre-deployment verification steps.
 - `/onboard` -- Introduces a new team member to the codebase architecture.
@@ -293,7 +307,7 @@ Deploying Claude Code across an enterprise involves choosing a billing model, co
 
 Claude Code is available through multiple deployment paths, each with different tradeoffs for billing, authentication, regional availability, and cost tracking.
 
-Per-seat subscription plans are self-service and include collaboration features, admin tools, and billing management. Enterprise plans add single sign-on, domain capture, role-based permissions, compliance API access, and the ability to deploy organization-wide managed policies. For organizations that need to route through their own cloud infrastructure, major cloud providers offer Claude Code access through their respective AI service platforms, with infrastructure-managed billing, regional deployments, prompt caching support, and integration with existing cloud authentication and cost-tracking systems.
+Per-seat subscription plans are self-service and include collaboration features, admin tools, and billing management. Enterprise plans add single sign-on, domain capture, role-based permissions, compliance API access, and the ability to deploy organization-wide managed policies. For organizations that need to route through their own cloud infrastructure, the major cloud providers offer Claude models through their AI platforms, and there is now an Anthropic-operated option billed through one cloud provider's marketplace with that provider's authentication. All of these bring infrastructure-managed billing, regional deployments, and integration with existing cloud authentication and cost-tracking systems. One practical caveat: not every feature is available on every provider -- cloud sessions, ultrareview, and some account-linked features require an Anthropic account -- and a feature-availability matrix in the documentation is worth checking before you commit.
 
 The choice is not purely economic. Organizations with strict data residency requirements may need cloud provider deployment for regional control. Organizations that want the simplest path should start with per-seat plans and move to cloud provider routing only when infrastructure requirements demand it.
 
@@ -301,7 +315,9 @@ The choice is not purely economic. Organizations with strict data residency requ
 
 An LLM gateway sits between Claude Code and the cloud provider to handle authentication and routing. Organizations use gateways for centralized usage tracking across teams, custom rate limiting and budgets, and centralized authentication management.
 
-Configuration is straightforward: set the appropriate base URL environment variable to point Claude Code at your gateway instead of directly at the provider. The gateway handles the authentication and routing transparently, and Claude Code operates normally. This works with direct API access, with cloud provider routing, and with any provider that supports the standard API interface.
+Configuration is straightforward: set the appropriate base URL environment variable to point Claude Code at your gateway instead of directly at the provider. The gateway handles the authentication and routing transparently, and Claude Code operates normally. This works with direct API access, with cloud provider routing, and with any provider that supports the standard API interface. Gateways must forward the headers and request fields Claude Code depends on; the documentation includes a compatibility guide listing what breaks when they are stripped.
+
+Anthropic now ships its own self-hostable gateway for the cloud-provider case. It sits in front of the cloud providers' endpoints and adds SSO sign-in through your identity provider, per-group model access, centralized policy, telemetry export, and per-developer spend limits by day, week, or month, enforced live on every request. For organizations on cloud billing that want the governance of an enterprise plan, it closes most of the gap.
 
 ### Corporate Proxy Configuration
 
@@ -309,7 +325,7 @@ Organizations that require all outbound traffic to pass through a proxy server f
 
 ### Organization-Wide CLAUDE.md
 
-Beyond project-level CLAUDE.md files, organizations can deploy CLAUDE.md files at system directories. On macOS, deploying to `/Library/Application Support/ClaudeCode/CLAUDE.md` applies organization-wide standards. On Linux, the equivalent path is under `/etc/claude-code/`. These system-level files apply to every Claude Code session on the machine, establishing organizational coding standards, security policies, and architectural constraints that no project-level configuration can override.
+Beyond project-level CLAUDE.md files, organizations can deploy CLAUDE.md files at system directories. On macOS, deploying to `/Library/Application Support/ClaudeCode/CLAUDE.md` applies organization-wide standards. On Linux, the equivalent path is under `/etc/claude-code/`, and on Windows under the program files directory. The same content can instead be delivered inline through a `claudeMd` key in managed settings. These system-level instructions apply to every Claude Code session on the machine, and developers cannot exclude them. Use them for behavioral guidance -- coding standards, data-handling reminders -- and use managed *settings* for anything that must be technically enforced: an instruction is a request; a deny rule is a wall.
 
 This creates a three-tier CLAUDE.md hierarchy: organization-wide standards at the system level, team-specific conventions at the repository level, and individual preferences at the user level. The layering means an organization can mandate "never commit secrets" at the system level, a team can add "always use our internal auth library" at the repository level, and a developer can add "I prefer tabs to spaces" at the user level.
 
@@ -329,7 +345,17 @@ Development containers are particularly valuable for three scenarios: isolating 
 
 ### Centralized MCP Configuration
 
-Organizations benefit from having one central team configure approved MCP servers and check the `.mcp.json` file into the codebase. This ensures that every developer connecting to the project gets the same MCP servers with the same approved connections, rather than each developer independently configuring connections to databases, APIs, and internal services. Combined with managed settings that restrict which MCP servers are allowed, this creates a controlled but functional integration layer.
+Organizations benefit from having one central team configure approved MCP servers and check the `.mcp.json` file into the codebase. This ensures that every developer connecting to the project gets the same MCP servers with the same approved connections, rather than each developer independently configuring connections to databases, APIs, and internal services. Combined with managed settings that restrict which MCP servers are allowed -- or that provide approved servers to every user directly -- this creates a controlled but functional integration layer.
+
+### Measuring Adoption and Spend
+
+You cannot manage what you cannot see, and the measurement tooling has caught up. On organization plans, an analytics dashboard shows daily active users, sessions, and contribution metrics, and a spend report breaks estimated usage-credit spend down by user and model. On API billing, a console dashboard and an analytics API return the same per-user metrics. On cloud-provider billing, OpenTelemetry export from each developer's machine -- or the gateway described above -- is how you attribute usage, and it works on every setup. A `modelPricing` managed setting makes the cost figures developers see match your contracted rates instead of list price.
+
+For a planning number: across enterprise deployments, average cost runs around thirteen dollars per developer per active day and one hundred fifty to two hundred fifty dollars per developer per month, with ninety percent of users under thirty dollars per active day. Pilot with a small group to establish your own baseline before you budget. Individuals get their own view too: `/usage` attributes consumption to skills, subagents, plugins, and MCP servers, and `/insights` writes a report on how someone actually works -- where things go wrong, and which features they have not tried.
+
+### Regulated Environments
+
+Three configurations matter for regulated organizations. Zero data retention is available on qualifying enterprise accounts, with some features disabled as a consequence. A HIPAA configuration prepares developer machines to run Claude Code in local mode under that regime, with specific version, network, and local-data requirements. And for organizations that route every process through an approved launcher, Claude Code can wrap the processes it starts -- including background sessions -- in that launcher.
 
 ### SSO and Domain Capture
 
@@ -365,8 +391,10 @@ This changes how companies think about talent deployment and project resourcing.
 - Commit CLAUDE.md to version control; it compounds in value as the team adds learnings, preventing errors for every future developer.
 - Different teams use Claude Code in fundamentally different ways: a security team's "commit as you go" autonomous pattern looks nothing like a product development team's synchronous supervision of core business logic.
 - Non-technical teams (legal, marketing, design, finance) extract categorically different value: a lawyer building a custom accessibility tool in one hour, a marketing team compressing ad creation from two hours to fifteen minutes, a designer making state management changes directly in the codebase.
-- Enterprise deployment requires choosing between per-seat and cloud-provider billing, configuring LLM gateways for centralized usage tracking, and deploying organization-wide CLAUDE.md to system directories.
+- Enterprise deployment requires choosing between per-seat and cloud-provider billing, configuring a gateway for centralized authentication, usage tracking, and spend limits, and deploying organization-wide CLAUDE.md and managed settings -- now deliverable from the server at sign-in.
+- Plugins are now versioned, dependency-aware, measurable, and testable with evals; mods need the strictest review because they run inside Claude Code.
+- Measure adoption and spend with the analytics dashboard, OpenTelemetry, `/usage`, and `/insights` before scaling.
 - The maintenance-to-scale progression (months one through three for MVP maintenance, three through six for feature expansion, six and beyond for hardening and refactoring) prevents both premature optimization and premature abandonment.
 - Dynamic surge staffing -- moving engineers onto unfamiliar codebases without the traditional productivity dip -- becomes possible when Claude Code collapses onboarding time from weeks to hours.
-- Custom slash commands encode team workflows as discoverable, reusable conventions; one security team accounts for half of all custom slash commands in their organization's entire monorepo.
+- Custom slash commands -- now written as skills -- encode team workflows as discoverable, reusable conventions; one security team accounts for half of all custom slash commands in their organization's entire monorepo.
 - Share project settings via VCS (`.claude/settings.json`) so that cloning the repo configures the entire Claude Code environment.

@@ -16,7 +16,9 @@ The symptoms are recognizable once you know what to look for. Claude starts repe
 
 This happens because the context window is full or nearly full. Auto-compaction (Chapter 3) kicks in and summarizes older content to make room, but the summarization is lossy. The resulting context is a degraded version of what you started with, and Claude works from the degraded version without knowing it is degraded.
 
-**Mitigation.** The defense is not reactive but structural. Use the context engineering techniques from Chapter 3: put critical instructions in CLAUDE.md (which reloads at full fidelity and survives compaction), use the "Compact Instructions" section for rules that must persist, route verbose operations through subagents (Chapter 4) to keep the main context lean, and compact proactively using `/compact` rather than waiting for auto-compaction.
+**Mitigation.** The defense is not reactive but structural. Use the context engineering techniques from Chapter 3: put critical instructions in CLAUDE.md (which reloads from disk after compaction), use a "Compact instructions" section to tell the summarizer what to keep, route verbose operations through subagents (Chapter 4) to keep the main context lean, and compact proactively using `/compact` rather than waiting for auto-compaction.
+
+The million-token window changed the shape of this failure, not its existence. On a model with a 200K window, the wall arrived fast and obviously. On a 1M model with the default compaction point near the ceiling, a session can degrade for a long time before anything compacts at all. If your long sessions feel foggy well before they compact, lower the auto-compact window (`/autocompact 300k`) so compaction happens while the conversation is still coherent enough to summarize well.
 
 Watch for the behavioral tells. When Claude starts asking questions it already has the answer to, when it proposes approaches you already rejected, when it modifies files you told it not to touch -- those are context exhaustion symptoms. The right response is not to repeat your instructions. The right response is to start a fresh session with a good CLAUDE.md file, because repeating instructions in a full context window just accelerates the exhaustion.
 
@@ -28,17 +30,17 @@ Each bash command Claude executes runs in a fresh shell environment. The working
 
 The failure mode is silent. Claude sets an environment variable in one command and references it in the next. The second command does not error with "variable not found." It runs with the variable unset, which might mean an empty string, which might mean it does the wrong thing quietly. Claude sets `NODE_ENV=production` to test something, runs the test in the next command, and the test runs in the default development mode. No error. Wrong result.
 
-**Recovery.** There is no recovery for the silent wrong result -- you need to catch it. The prevention is awareness. When Claude chains bash commands that depend on shared state, the state needs to be re-established in each command. Set the variable and run the command on the same line: `NODE_ENV=production npm test`. Or source a setup script at the start of each command. Or use Claude's environment variable configuration in settings.json, which injects variables into every bash command automatically.
+**Recovery.** There is no recovery for the silent wrong result -- you need to catch it. The prevention is awareness. When Claude chains bash commands that depend on shared state, the state needs to be re-established in each command. Set the variable and run the command on the same line: `NODE_ENV=production npm test`. Or use Claude's environment variable configuration in settings.json, which injects variables into every bash command automatically. For setup that must be sourced -- a virtual environment, a version manager -- write it to the file named by `CLAUDE_ENV_FILE` from a SessionStart hook; Claude Code runs that file before every Bash command (Chapter 6). And if you want to move the whole session to a different directory, `/cd` does it without breaking the prompt cache.
 
 Watch for this especially in: virtual environment activation (`source venv/bin/activate` does not persist), directory-specific environment files that are sourced once, shell function definitions used across commands, and any workflow where "run this then run that" assumes shared state.
 
 ## MCP Disconnection: Tools That Vanish
 
-MCP servers connect at session start and can disconnect at any time. When they disconnect, the tools they provided simply disappear from Claude's available tool set. There is no notification. No error. Claude just stops being able to do things it could do a minute ago.
+MCP servers connect at session start and can disconnect at any time. Remote servers now retry on their own with backoff, which removes most of the pain, but a local server process that crashes stays down, and its tools simply disappear from Claude's available tool set. Claude just stops being able to do things it could do a minute ago.
 
 The failure mode presents as Claude suddenly being unable to perform tasks it was handling fine. If Claude was using an MCP-provided tool to query a database and the server disconnects, Claude does not say "I lost my database tool." It tries to find alternative approaches, fails at them, and produces increasingly confused output as it tries to work around a missing capability it does not know is missing.
 
-**Recovery.** The `/mcp` command shows the status of connected MCP servers. If a server is disconnected, you can restart it from there. Proactively, check MCP status when Claude's behavior changes unexpectedly, especially if it was previously using external tools fluently. MCP reliability details are covered in Chapter 5, but the recovery is the same regardless of cause: reconnect the server or restart the session.
+**Recovery.** The `/mcp` command shows the status of connected MCP servers. If a server is disconnected, you can restart it from there, or retry every failed server at once with `/mcp reconnect all`. Proactively, check MCP status when Claude's behavior changes unexpectedly, especially if it was previously using external tools fluently. MCP reliability details are covered in Chapter 5, but the recovery is the same regardless of cause: reconnect the server or restart the session.
 
 ## Subagent Context Return Overflow
 
@@ -54,9 +56,9 @@ The broader lesson is that subagent orchestration requires thinking about inform
 
 ## The Checkpoint System: What It Tracks and What It Misses
 
-Claude Code automatically tracks every file edit as you work, creating checkpoints that let you rewind to previous states. Every user prompt creates a new checkpoint. Checkpoints persist across sessions, so you can access them even in resumed conversations. This is a genuine safety net -- one of the best features for recovering from wrong turns.
+Claude Code automatically tracks every file edit as you work, creating checkpoints that let you rewind to previous states. Every prompt that starts a turn creates a new checkpoint; file snapshots are kept for the hundred most recent. Checkpoints are saved with the conversation, so you can rewind even in resumed sessions -- until the retention sweep deletes old snapshots, by default about thirty days later. This is a genuine safety net -- one of the best features for recovering from wrong turns.
 
-The rewind interface is accessed by pressing Esc twice (Esc + Esc) or by typing `/rewind`. This opens a scrollable list showing each of your prompts from the session. Select the point you want to act on, then choose from four options:
+The rewind interface is accessed by pressing Esc twice on an empty prompt or by typing `/rewind` (aliases: `/checkpoint`, `/undo`). This opens a scrollable list showing each of your prompts from the session. Select the point you want to act on, then choose from these options:
 
 1. **Restore code and conversation** -- revert both your files and the conversation history to that point. This is the full rewind: Claude loses memory of everything after that checkpoint, and the code returns to its state at that moment.
 
@@ -64,15 +66,15 @@ The rewind interface is accessed by pressing Esc twice (Esc + Esc) or by typing 
 
 3. **Restore code only** -- revert the file changes while keeping the full conversation history. Useful when the code went wrong but the discussion contains valuable context you want to preserve.
 
-4. **Summarize from here** -- this is different from the restore options. It does not revert anything. Instead, it condenses the conversation from the selected point onward into a compact summary, freeing context window space while preserving the key information. This is a context management tool, not a recovery tool.
+4. **Summarize from here** and **Summarize up to here** -- these are different from the restore options. They do not revert anything. They condense the conversation after (or before) the selected point into a compact summary, freeing context window space while preserving the key information. These are context management tools, not recovery tools.
 
-The three restore options undo state. Summarize compresses it. The distinction matters when you are deciding which recovery path to take.
+The three restore options undo state. Summarize compresses it. The distinction matters when you are deciding which recovery path to take. One more entry is worth knowing about: if you ran `/clear` earlier in the same process, the top of the rewind list offers the previous conversation, so an accidental clear is recoverable.
 
 But checkpoints have a gap that will burn you.
 
 Checkpoints track direct file edits -- when Claude uses the Write, Edit, or NotebookEdit tools. They do not track file changes made through bash commands. If Claude runs `rm important_file.py` or `mv src/old.py src/new.py` or `sed -i 's/foo/bar/g' *.py` through the bash tool, those changes are invisible to the checkpoint system. Rewinding to a checkpoint before those commands does not undo them.
 
-Checkpoints also do not track changes made by concurrent sessions, external processes, or anything that happens outside Claude Code's tool invocations. If another Claude Code instance modifies a file, those modifications are not in your session's checkpoint history.
+Checkpoints also do not track changes made by concurrent sessions, external processes, or anything that happens outside Claude Code's tool invocations. If another Claude Code instance modifies a file, those modifications are not in your session's checkpoint history. Two newer gaps follow from features covered elsewhere in this book: edits made by *background* subagents -- now the default -- are not restored by rewinding, including a background `/code-review --fix`; and symlinked or hard-linked files are skipped during a code restore, with a warning naming how many.
 
 **Recovery.** Git is the reliable checkpoint. If you followed the commit-frequently pattern from Chapter 1, you have git commits that cover everything -- file edits, bash modifications, renames, deletions. `git checkout` is the universal rewind, not just for Claude's tool-tracked edits but for anything. Think of checkpoints as "local undo" and git as "permanent history." They complement each other but are not interchangeable.
 
@@ -84,13 +86,15 @@ Every new session starts with a blank context window. The sophisticated understa
 
 The failure mode is not that Claude forgets. It is that Claude does not know it forgot. It approaches the codebase fresh, makes the same assumptions the previous session started with, and potentially repeats the same mistakes the previous session corrected.
 
-**Recovery.** There are three persistence mechanisms, and you should use all of them.
+**Recovery.** There are four persistence mechanisms, and you should use all of them.
 
 First, CLAUDE.md files (Chapter 3). These reload at full fidelity on every session start. Put critical project knowledge, architectural decisions, and hard-won lessons here. After a productive session, ask Claude to suggest CLAUDE.md updates that capture what it learned.
 
-Second, the task system. Tasks stored as JSON files in `.claude/tasks/` persist across sessions. If you are running a multi-step project, the task list provides continuity between sessions -- Claude can read the task statuses and pick up where the previous session left off.
+Second, auto memory. Claude now keeps its own per-repository notes -- corrections you made, preferences you stated, quirks it discovered -- and loads their index at the start of every session. It narrows the amnesia without eliminating it, and its notes deserve the same review as anything else that steers Claude (Chapter 3).
 
-Third, git history. The code itself is a form of memory. Claude can read recent commits, understand what changed, and infer intent from the diff. This is less reliable than explicit instructions but better than nothing.
+Third, durable plans and task state. A spec or plan file on disk, or a shared task list where the task tools are enabled, lets a new session read where the previous one left off.
+
+Fourth, git history. The code itself is a form of memory. Claude can read recent commits, understand what changed, and infer intent from the diff. This is less reliable than explicit instructions but better than nothing.
 
 The developers who suffer most from agent amnesia are the ones who rely on long sessions to maintain context instead of externalizing knowledge into persistent structures. A two-hour session that ends without updating CLAUDE.md is two hours of context development that evaporates.
 
@@ -100,7 +104,7 @@ Context pollution is what happens when the window fills with content that is not
 
 The failure mode: Claude has plenty of context window remaining by token count, but the useful signal-to-noise ratio has degraded. Claude's responses become less focused because the relevant context is diluted by irrelevant content. In severe cases, Claude drops bugs rather than tracking them -- the window is so polluted that new information gets lost in the noise.
 
-**Mitigation.** Proactive compaction with `/compact` clears the accumulated noise. Subagent delegation prevents pollution in the first place -- when you route exploratory work through a subagent, the exploration noise stays in the subagent's context and only the result enters the main window.
+**Mitigation.** Proactive compaction with `/compact` clears the accumulated noise, and the rewind menu's summarize options can compress just the polluted stretch. Subagent delegation prevents pollution in the first place -- when you route exploratory work through a subagent, the exploration noise stays in the subagent's context and only the result enters the main window. For quick lookups that do not need to stay in the conversation at all, ask with `/btw`.
 
 Spec-driven development (Chapter 8) provides structural mitigation. When Claude works from a spec document on disk rather than from accumulated conversation context, the spec serves as a persistent, unpolluted source of truth that survives context degradation. The conversation can fill with noise, but the spec file remains clean.
 
@@ -112,7 +116,7 @@ Experienced practitioners have cataloged five recurring failure patterns, each w
 
 **Correcting over and over.** Claude gets something wrong. You explain the problem. Claude patches it. The patch introduces a new issue. You explain that. Claude patches again. Three corrections later, the context is full of failed approaches, and Claude is more confused than when it started. The fix: after two failed corrections, stop. Use `/clear` and write a better initial prompt that incorporates what you learned from the failures. The knowledge of what went wrong goes into the new prompt, not into a correction spiral inside a degraded context.
 
-**The over-specified CLAUDE.md.** If your CLAUDE.md file is too long, Claude ignores half of it because important rules get lost in the noise. The document that was supposed to provide guardrails becomes a wall of text that Claude skims. The fix is ruthless pruning. If Claude already does something correctly without the instruction, delete that instruction. Convert style rules that Claude frequently violates into hooks that enforce them automatically rather than instructions that hope for compliance. CLAUDE.md should contain only what Claude cannot figure out by reading the code and what it has been observed to get wrong.
+**The over-specified CLAUDE.md.** If your CLAUDE.md file is too long, Claude ignores half of it because important rules get lost in the noise. The document that was supposed to provide guardrails becomes a wall of text that Claude skims. The fix is ruthless pruning -- `/doctor` will propose cuts for anything Claude could derive from the codebase. If Claude already does something correctly without the instruction, delete that instruction. Convert style rules that Claude frequently violates into hooks that enforce them automatically rather than instructions that hope for compliance. CLAUDE.md should contain only what Claude cannot figure out by reading the code and what it has been observed to get wrong.
 
 **The trust-then-verify gap.** Claude produces a plausible-looking implementation. It compiles. It runs. You ship it. Then it fails in production on an edge case that the implementation never considered. The output looked right, so you assumed it was right. The fix: always provide verification. Tests, scripts, screenshots, manual spot checks. If you cannot verify a piece of output, do not ship it. The verification infrastructure is not overhead. It is the mechanism that converts Claude's confident-but-uncertain output into validated output.
 
@@ -124,23 +128,38 @@ Hooks (Chapter 2) can trigger on lifecycle events, including when Claude stops e
 
 The failure mode: a stop hook that always tells Claude to continue. Claude finishes, the hook fires, the hook says "keep going," Claude does more work, finishes again, the hook fires again, says "keep going" again. This is an infinite loop. Claude never stops because the stop condition is never met.
 
-The system includes a `stop_hook_active` field to prevent runaway loops, but the underlying design risk is real. If your stop hook's "keep going" condition is based on criteria that Claude cannot actually satisfy -- tests that fail for reasons unrelated to Claude's changes, linting rules that are impossible to pass, external services that are down -- the loop will exhaust your token budget before it converges.
+The system includes a `stop_hook_active` field in the hook input so your script can tell it is already in a continuation, and Claude Code caps the number of consecutive blocks before it hands control back -- but the underlying design risk is real. If your stop hook's "keep going" condition is based on criteria that Claude cannot actually satisfy -- tests that fail for reasons unrelated to Claude's changes, linting rules that are impossible to pass, external services that are down -- the loop will exhaust your token budget before it converges.
 
-**Prevention.** Include iteration limits in stop hooks. "If tests still fail after three attempts, stop and report the remaining failures." Test stop hooks with intentionally failing conditions to verify they eventually terminate. Monitor token usage when using stop hooks for the first time.
+**Prevention.** Include iteration limits in stop hooks. "If tests still fail after three attempts, stop and report the remaining failures." Test stop hooks with intentionally failing conditions to verify they eventually terminate. Monitor token usage when using stop hooks for the first time. If what you want is "keep working until X," consider `/goal` instead (Chapter 8): its evaluator can declare a condition impossible and clear itself, it stops when Claude stops making progress, and errors you have to fix -- an expired login, a missing model -- clear the goal rather than looping on them.
 
 ## Agent Team Limitations
 
 Agent teams (Chapter 4) are experimental, and their limitations are shaped by that status.
 
-**No session resumption.** If a team member's session crashes or is interrupted, it cannot be resumed. The work is lost. For long-running team tasks, this means a crash at 90% completion requires restarting from scratch.
+**No resumption of in-process teammates.** `/resume` and `/rewind` do not bring teammates back. After resuming a session, the lead may try to message teammates that no longer exist; tell it to spawn new ones. For long-running team tasks, a crash at 90% completion means respawning workers and handing them the remaining tasks.
 
-**Task status lag.** Updates to the shared task list are not instantaneous. An agent may pick up a task that another agent has already started working on, leading to duplicate effort.
+**Task status lag.** Teammates sometimes fail to mark a task complete, which leaves its dependents blocked even though the work is done. (Claiming is file-locked, so two teammates do not grab the same task; the risk is stalled tasks, not duplicated ones.)
 
-**One team per session.** The orchestrator session can have only one active team. If you need multiple independent teams, you need multiple orchestrator sessions.
+**One team per session.** The lead session has exactly one team. If you need multiple independent teams, you need multiple lead sessions.
 
-**No nested teams.** A team member cannot create its own sub-team. The hierarchy is flat: one orchestrator, multiple team members. This limits the complexity of decomposition you can express.
+**No nested teams.** A teammate cannot create its own sub-team, and in-process teammates cannot run background subagents. The hierarchy is flat: one lead, multiple teammates.
 
-**Recovery.** The pragmatic response is to keep team tasks small enough that losing one is tolerable, to accept some duplicate work as the cost of loose coordination, and to check task statuses manually when precise coordination matters.
+**No file isolation.** Teammates share a working tree. Two teammates editing the same file overwrite each other.
+
+**Recovery.** The pragmatic response is to keep team tasks small enough that losing one is tolerable, partition files so each teammate owns its own, nudge or manually update stalled tasks, and check the task list (Ctrl+T) when precise coordination matters. For work where reliability matters more than live collaboration, a dynamic workflow's resumable, script-held state is the sturdier container.
+
+## When the Configuration Is the Bug
+
+A newer failure mode comes from the extension layer itself. A typical power-user setup now includes a dozen plugins, a few mods, hooks from three settings files, MCP servers, and skills from several directories. When something goes wrong -- a command that silently does nothing, a model that keeps switching, a hook that blocks everything -- the cause is as likely to be the configuration as the model.
+
+The diagnostic ladder:
+
+1. **`/doctor`** runs a full setup checkup: installation health, settings files that failed to parse, extension and CLAUDE.md problems. It proposes fixes and applies them only after you confirm. `claude doctor` from the shell gives a read-only version without starting a session.
+2. **`/context`**, **`/hooks`**, **`/mcp`**, and **`/status`** show what actually loaded, and from where -- the gap between what you configured and what is in effect is usually the bug.
+3. **`claude --safe-mode`** starts a session with every customization off -- CLAUDE.md, skills, plugins, mods, hooks, MCP servers, custom agents, auto memory -- while authentication, models, and permissions work normally. If the problem disappears in safe mode, it lives in your configuration; bisect from there.
+4. **`/debug`** turns on debug logging mid-session and has Claude read the log to troubleshoot.
+
+And when the problem is Claude Code itself rather than your setup, `/feedback` can attach a report Claude drafts from the session, which you review before anything is sent.
 
 ## Hallucination in High-Stakes Contexts
 
@@ -284,9 +303,10 @@ The discipline required is emotional, not technical. Reverting feels like wastin
 
 ## Key Takeaways
 
-- Context exhaustion is the most common failure mode -- watch for repeated suggestions, forgotten instructions, and degraded coherence as symptoms of a full context window.
+- Context exhaustion is the most common failure mode -- watch for repeated suggestions, forgotten instructions, and degraded coherence. On million-token models, lower the auto-compact window so compaction happens before the fog sets in.
 - Bash environment variables do not persist between commands; re-establish state in each command or use settings-level environment configuration.
-- The checkpoint system offers four rewind options (restore code and conversation, restore conversation only, restore code only, summarize from here), but checkpoints track only direct file edits -- not bash-command file operations; git commits are the only reliable universal rewind mechanism.
+- The rewind menu restores code, conversation, or both, and can summarize before or after a point, but checkpoints track only direct file edits in your session -- not bash-command file operations or background subagent edits; git commits are the only reliable universal rewind mechanism.
+- When behavior is inexplicable, suspect the configuration: `/doctor`, `/status`, and `claude --safe-mode` separate setup bugs from model mistakes.
 - The five named anti-patterns -- kitchen sink session, correcting over and over, over-specified CLAUDE.md, trust-then-verify gap, infinite exploration -- each have specific, immediate fixes.
 - The 33-day autonomous trading experiment demonstrates every category of agent failure in one continuous arc: overconfidence, correlation risk, concentration risk, governance paradoxes, and the fundamental unreliability of confident output.
 - "Vibe trading" extends the vibe coding trap to non-coding domains -- false confidence in agent-generated results is more dangerous when feedback loops are slow and stakes are financial.

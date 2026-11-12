@@ -4,7 +4,7 @@
 
 Claude Code in a terminal with a human watching is one tool. Claude Code running unattended in a CI pipeline, processing tickets at 3 AM, or fixing broken builds before anyone wakes up is a different category of tool entirely. The shift from interactive to headless is not just a flag you pass. It changes the permission model, the output format, the failure recovery strategy, and the economics of what you can automate.
 
-This chapter covers headless mode and everything that surrounds it: the flags that make Claude Code non-interactive, the output formats that make it composable with Unix tooling, the container strategies that make it safe to run unattended, and the integration patterns that connect it to real CI/CD systems. You will learn how to write concrete CI workflow definitions that run Claude Code as a first-class pipeline step, how hooks create automated quality gates that block bad code before it ships, and how the fan-out pattern lets you batch-process entire repositories file by file. You will also learn where the gaps are -- what headless automation cannot yet do, and when those gaps are likely to close.
+This chapter covers headless mode and everything that surrounds it: the flags that make Claude Code non-interactive, the output formats that make it composable with Unix tooling, the container strategies that make it safe to run unattended, and the integration patterns that connect it to real CI/CD systems. You will learn how to write concrete CI workflow definitions that run Claude Code as a first-class pipeline step, how hooks create automated quality gates that block bad code before it ships, and how the fan-out pattern lets you batch-process entire repositories file by file. You will also learn which of the first edition's "coming soon" gaps have closed -- pull requests that fix their own CI failures, review on every pull request, prompts that run on a schedule in the cloud -- and how to decide between scripting Claude Code yourself and using the built-in automation.
 
 The developers getting the most value from Claude Code are not the ones typing the cleverest prompts. They are the ones who figured out that Claude Code can work while they sleep.
 
@@ -12,7 +12,7 @@ The developers getting the most value from Claude Code are not the ones typing t
 
 ## Headless Mode
 
-The `-p` flag transforms Claude Code from an interactive REPL into a non-interactive command processor. You pass a prompt, Claude executes it, and the result comes back on stdout. No terminal UI. No permission dialogs. No waiting for human input.
+The `-p` flag transforms Claude Code from an interactive REPL into a non-interactive command processor. You pass a prompt, Claude executes it, and the result comes back on stdout. No terminal UI. No waiting for human input. The documentation now calls this "the Agent SDK via the CLI," which is a useful reframing: `claude -p` is the same agent loop that the Python and TypeScript SDK packages expose as a library, and anything you prototype in a shell script can graduate to a program later.
 
 ```
 claude -p "Refactor the auth module to use dependency injection"
@@ -20,10 +20,14 @@ claude -p "Refactor the auth module to use dependency injection"
 
 That is the simplest form. In practice, headless mode supports a set of flags that control its behavior precisely:
 
-- `--output-format` selects between `text` (human-readable), `json` (structured, machine-parseable), and `stream-json` (newline-delimited JSON objects emitted as work progresses).
+- `--output-format` selects between `text` (human-readable), `json` (structured, machine-parseable, including the estimated cost of the run), and `stream-json` (newline-delimited JSON objects emitted as work progresses).
+- `--json-schema` makes the run return validated JSON matching a schema you supply, in a `structured_output` field. Check that the field exists before using it: a run that declines or fails has none.
 - `--max-turns` caps the number of agentic loop iterations, preventing runaway execution.
-- `--budget` sets a spending limit for the session.
-- `--model` selects a specific model for the run.
+- `--max-budget-usd` stops the run once estimated spend reaches a dollar amount, subagents included. Leave headroom; spend can overshoot slightly.
+- `--model` and `--effort` select the model and effort level for the run.
+- `--bare` skips auto-discovery of hooks, skills, plugins, MCP servers, auto memory, and CLAUDE.md, so the run starts faster and behaves the same on every machine. It is the recommended mode for scripts and is slated to become the default for `-p`. Pass what you need explicitly with `--settings`, `--mcp-config`, `--agents`, and `--append-system-prompt-file`. Bare mode authenticates with an API key, not your subscription login.
+
+Two behaviors surprise people coming from the first edition. First, a `-p` run now starts in Manual permission mode unless you say otherwise: anything that would need approval is denied, not silently allowed. Set the baseline you want with `--permission-mode` (more on this below). Second, a `-p` run waits for background work Claude started -- subagents, workflows, background commands -- before exiting, so a script will not return with half the results. An idle wait is capped at ten minutes by default.
 
 The `stream-json` format deserves particular attention. Each line is a self-contained JSON object representing one step of Claude's work: a tool call, a result, a thinking step, a final response. This format is designed for pipeline consumption -- you can pipe it into a monitoring system, a log aggregator, or another program that reacts to Claude's actions in real time.
 
@@ -117,7 +121,15 @@ One caveat: container isolation cannot prevent credential exfiltration if your C
 
 ## Permission Handling for Unattended Operation
 
-Not every headless deployment uses containers. Some run directly on CI hosts or in environments where container isolation is not available. For these cases, Claude Code provides `--permission-prompt-tool`, which delegates permission decisions to an MCP tool.
+Not every headless deployment uses containers. Some run directly on CI hosts or in environments where container isolation is not available. For these, pick a baseline permission mode and then refine it:
+
+- **`--permission-mode dontAsk`** denies everything that would prompt, while still running reads, the read-only command set, and anything your `--allowedTools` or `permissions.allow` rules cover. This is the locked-down CI default: explicit allowlist, nothing else.
+- **`--permission-mode auto`** lets the auto-mode classifier (Chapter 2) review each action. Blocked actions are skipped and the run continues. Note that auto mode drops broad allow entries like a bare `Bash`, so the classifier still sees every command.
+- **`--permission-mode acceptEdits`** lets Claude write files and run common filesystem commands, while other shell commands still need allow rules.
+
+Add **`--permission-prompts none`** when nobody can answer a prompt. Anything that falls through to a prompt is denied, Claude is told not to retry, and tools that need a human -- such as asking you a clarifying question -- are removed entirely. Denials are reported in the stream as `permission_denied` events and listed in the final result, which makes a CI log far easier to audit.
+
+For policy that is more than an allowlist, Claude Code provides `--permission-prompt-tool`, which delegates permission decisions to an MCP tool. A `PermissionRequest` hook achieves the same thing without an MCP server.
 
 When Claude Code encounters an action that would normally require human approval, instead of prompting a user (who is not there), it calls the specified MCP tool with the details of the requested action. The tool decides whether to approve, deny, or modify the request.
 
@@ -139,13 +151,15 @@ Interactive Claude Code sessions adapt to conversation flow. Headless sessions n
 
 The decision between replacing and appending is straightforward: replace when you want total control (automated analysis tasks with specific output formats), append when Claude Code's default behaviors are useful and you just need to add constraints or focus areas on top.
 
-All four flags work only in print mode (`-p`). The file-based variants are always preferred for CI because they produce reviewable, version-controlled prompt definitions instead of inline strings buried in workflow YAML.
+All four flags work in both interactive and print mode, and the inline and file forms can now be combined. The file-based variants are always preferred for CI because they produce reviewable, version-controlled prompt definitions instead of inline strings buried in workflow YAML. One subtlety: the system prompt is recorded on a conversation's first request and reused when you `--continue` it, so a changed prompt file does not take effect mid-conversation. Pass `--system-prompt-snapshot off` while you iterate on the wording.
+
+Two flags matter for cost at scale. A replacement prompt that mixes fixed instructions with per-run context can include a line containing only `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__`; everything above it stays cached across runs. And `--exclude-dynamic-system-prompt-sections` moves per-user details out of the default system prompt, so the same task run by many users on many machines shares one prompt cache.
 
 For CI pipelines that run repeatedly, prompt files combined with CLAUDE.md provide two layers of reproducible context: the system prompt governs Claude's behavior for this specific CI task, while CLAUDE.md provides project-wide knowledge.
 
 ## CI Platform Integration Patterns
 
-Major version control platforms now offer first-class CI integrations for Claude Code. The two most mature are the built-in CI workflow systems of the dominant code hosting platform and a major alternative platform's pipeline system. Both treat Claude Code as a native CI actor, not a bolted-on afterthought. Three patterns have proven effective in production.
+Major version control platforms now offer first-class CI integrations for Claude Code. The two most mature are the built-in CI workflow systems of the dominant code hosting platform and a major alternative platform's pipeline system, both of which can also route through the major cloud providers' model endpoints instead of Anthropic's API. Both treat Claude Code as a native CI actor, not a bolted-on afterthought. On the dominant platform, a single command inside Claude Code installs the integration's app for a repository and sets up the workflow and secrets. Three patterns have proven effective in production.
 
 **Automated PR fixes.** A workflow triggers when a PR receives a review comment requesting changes. Claude Code reads the comment, checks out the branch, makes the requested changes, and pushes a new commit. The human reviewer's feedback becomes a prompt that drives automated implementation.
 
@@ -155,7 +169,7 @@ The workflow looks like this: a webhook fires on PR comment, the CI job starts a
 
 One design team discovered an especially elegant variant of this pattern. Designers file issues describing UI polish tasks -- spacing adjustments, color corrections, animation tweaks -- and a CI workflow automatically proposes code changes without anyone opening Claude Code. The designer reviews the resulting PR, requests adjustments through PR comments (which trigger another automated Claude Code pass), and merges when satisfied. Design polish, which used to require an engineer to context-switch away from feature work, now flows through the same ticket-to-PR pipeline as any other task.
 
-**Automated code review.** Every PR triggers a headless Claude Code session that reads the diff, checks it against project conventions encoded in CLAUDE.md, and posts review comments. This is not a replacement for human review. It is a first pass that catches style violations, missing tests, and obvious bugs before a human reviewer looks at the code. The human reviewer sees a cleaner PR and spends their time on architectural and design questions rather than formatting and convention enforcement.
+**Automated code review.** Every PR triggers a headless Claude Code session that reads the diff, checks it against project conventions encoded in CLAUDE.md, and posts review comments. This is not a replacement for human review. It is a first pass that catches style violations, missing tests, and obvious bugs before a human reviewer looks at the code. The human reviewer sees a cleaner PR and spends their time on architectural and design questions rather than formatting and convention enforcement. You can still build this yourself in a workflow -- but for most teams the managed review service described below is now the better starting point.
 
 All three patterns follow the same structure: event trigger, context assembly, headless Claude Code execution, result publication. The event provides the prompt. The repository provides the context. Claude Code provides the implementation. The CI system provides the orchestration.
 
@@ -163,21 +177,21 @@ These patterns work today, but they work best for well-defined, bounded tasks. A
 
 ### The /commit-push-pr Skill
 
-For interactive workflows that end in a pull request, the `/commit-push-pr` skill eliminates the three-step dance of committing, pushing, and opening a PR. One command does all three. If you have a team chat MCP server configured and have specified notification channels in your CLAUDE.md (for example, "post PR URLs to #team-prs"), the skill also posts the PR link to the team channel automatically. The workflow shrinks from commit-push-open-browser-fill-in-PR-description-post-to-chat to a single command that handles the entire chain.
+For interactive workflows that end in a pull request, the `/commit-push-pr` skill -- part of a commit-commands plugin in Anthropic's official marketplace -- eliminates the three-step dance of committing, pushing, and opening a PR. One command does all three. If you have a team chat MCP server configured and have specified notification channels in your CLAUDE.md (for example, "post PR URLs to #team-prs"), the skill also posts the PR link to the team channel automatically. The workflow shrinks from commit-push-open-browser-fill-in-PR-description-post-to-chat to a single command that handles the entire chain.
 
 ### The --from-pr Flag
 
-When a PR is created through Claude Code (either via `/commit-push-pr` or by asking Claude to create a PR using the platform CLI), the session is automatically linked to that PR number. Later, from any machine, you can resume the session with:
+When a PR is created through Claude Code (either via `/commit-push-pr` or by asking Claude to create a PR using the platform CLI), the session is automatically linked to that PR. Later, you can find it again with:
 
 ```
 claude --from-pr 123
 ```
 
-This restores the full conversation context from the session that produced the PR. You pick up exactly where Claude left off -- same understanding of the codebase, same design decisions, same constraints. This is invaluable for PR review cycles where a reviewer requests changes days after the original implementation.
+This opens the session picker filtered to sessions linked to that pull request -- by number, or by a PR or merge-request URL from any of the major hosting platforms. Pasting the PR URL into `/resume` does the same thing. Pick the session and you restore the full conversation context that produced the PR. You pick up exactly where Claude left off -- same understanding of the codebase, same design decisions, same constraints. This is invaluable for PR review cycles where a reviewer requests changes days after the original implementation.
 
 ### Messaging Integration
 
-Claude Code integrates with team messaging platforms through MCP connectors. The most common pattern routes bug reports from a team chat directly to pull requests. A team member mentions the Claude Code bot in a channel with a bug description. Claude Code reads the message, creates a branch, implements a fix, opens a PR, and posts the PR link back to the channel. The entire workflow -- from bug report to PR -- happens without anyone opening an IDE.
+Claude Code integrates with team messaging platforms both through MCP connectors and through a first-party chat app. The most common pattern routes bug reports from a team chat directly to pull requests. A team member mentions Claude in a channel with a bug description. A cloud session reads the message, creates a branch, implements a fix, opens a PR, and posts the PR link back to the channel. The entire workflow -- from bug report to PR -- happens without anyone opening an IDE. For organizations, Claude Tag runs that mention as a shared team identity with administrator-configured access, rather than as each person's individual account.
 
 This transforms team messaging from a coordination tool into a dispatch system. The bug report becomes the prompt. The codebase provides the context. Claude Code provides the implementation. The messaging platform closes the loop by posting results.
 
@@ -187,17 +201,20 @@ One of the most powerful headless patterns is fan-out: looping through a set of 
 
 ```bash
 for file in $(find src -name '*.ts' -type f); do
-  claude -p "Review $file for security vulnerabilities" \
-    --allowedTools "Read,Grep,Glob" \
+  claude --bare -p "Review $file for security vulnerabilities" \
+    --tools "Read,Bash" \
+    --permission-mode dontAsk \
     --output-format json >> reviews.jsonl
 done
 ```
 
-The `--allowedTools` flag is the key. It restricts Claude Code to read-only tools for this run -- it can read files, search the codebase, and grep for patterns, but it cannot modify anything. This converts a potentially dangerous batch operation into a safe analysis pass.
+The permission flags are the key. `--tools` restricts which built-in tools exist at all; `dontAsk` mode then denies anything that would need approval, so Claude can read files and run read-only search commands, but cannot modify anything. This converts a potentially dangerous batch operation into a safe analysis pass. (A note on search: on Linux and macOS, Claude now searches with `grep` and `find` through the shell rather than dedicated search tools, so read-only shell access is what an analysis pass needs.)
 
 Fan-out scales well for certain tasks. Security auditing across hundreds of files. Documentation generation for each module. Test coverage analysis per component. Consistency checking against coding standards. Each invocation gets a fresh context, focused on a single file, with permissions scoped to exactly what the task requires.
 
 The pattern composes with standard Unix tools. The output is newline-delimited JSON, which means you can pipe it into analysis tools, filter it, or aggregate it. A CI job that runs the fan-out, filters for high-severity findings, and opens issues for each one is entirely achievable with shell scripting and the CLI.
+
+Before writing the loop, check whether a built-in does it. `/batch` decomposes one large change into five to thirty independent units and runs each in its own worktree-isolated subagent. A dynamic workflow (Chapter 4) does the same with verification built in and a progress view you can pause. The shell loop remains the right tool when you need each invocation to be a separate, independently retryable CI step.
 
 ## CI Pipeline Generation
 
@@ -329,22 +346,21 @@ The `TaskCompleted` hook fires when Claude marks a task as complete. Exit code 2
 ```bash
 #!/bin/bash
 INPUT=$(cat)
-SUBJECT=$(echo "$INPUT" | jq -r '.task.subject // empty')
+SUBJECT=$(echo "$INPUT" | jq -r '.task_subject // empty')
 
-npm test 2>&1
-if [ $? -ne 0 ]; then
-  echo '{"reason": "Tests are failing. Please fix before marking complete."}'
+if ! npm test 2>&1; then
+  echo "Tests are failing. Fix them before completing: $SUBJECT" >&2
   exit 2
 fi
 
 exit 0
 ```
 
-Claude cannot mark the task as done until the tests pass. It receives the failure output, fixes the issues, and tries again. This is especially powerful in multi-agent workflows where subagents complete tasks autonomously -- the hook ensures no task is marked "done" until the verification passes.
+Claude cannot mark the task as done until the tests pass. With exit code 2, whatever the script writes to stderr becomes Claude's feedback; it fixes the issues and tries again. This is especially powerful in multi-agent workflows where teammates complete tasks autonomously -- the hook ensures no task is marked "done" until the verification passes. (It only fires where the task tools are in use; on the newest models, those are opt-in, as Chapter 4 explains.)
 
 ### Agent-Based Stop Hook: Intelligent Verification
 
-The most powerful hook variant is `type: "agent"`. Instead of running a bash script, Claude Code spawns a subagent with full tool access (Read, Grep, Glob) to evaluate whether Claude should stop. The subagent can investigate the codebase, run tests, and make a reasoned decision:
+The most powerful hook variant is `type: "agent"`, still marked experimental. Instead of running a bash script, Claude Code spawns a subagent with tool access to evaluate whether Claude should stop. The subagent can investigate the codebase, run tests, and make a reasoned decision:
 
 ```json
 {
@@ -364,7 +380,7 @@ The subagent runs the test suite, checks the results, and returns `{"ok": true}`
 
 ### CLAUDE_ENV_FILE: Persisting Environment Variables
 
-SessionStart hooks have access to the `CLAUDE_ENV_FILE` environment variable -- a file path where you can write `export` statements that will be sourced before every subsequent Bash command in the session. This solves a persistent problem in CI: ensuring that Claude Code's Bash commands run with the right environment.
+SessionStart hooks have access to the `CLAUDE_ENV_FILE` environment variable -- the path of a shell script that Claude Code runs before every subsequent Bash command in the session, in the same shell process. Write `export` statements to it and they are visible to every command. This solves a persistent problem in CI: ensuring that Claude Code's Bash commands run with the right environment.
 
 ```bash
 #!/bin/bash
@@ -416,15 +432,37 @@ The key design decision is that network isolation happens at the OS level via fi
 
 For teams that need consistent, reproducible environments across developers and CI, the reference devcontainer is the starting point. Clone it, customize the language runtime and dependencies for your stack, adjust the network allowlist, and you have a secure environment for both interactive development and headless CI operation.
 
-## The CI Auto-Fix Gap
+## The CI Auto-Fix Gap, Closed
 
-One integration pattern that does not yet exist but is widely anticipated: automatic CI failure remediation.
+The first edition ended this chapter's integration section on a prediction: automatic CI failure remediation was "widely anticipated" and would likely arrive in mid-2026 as a first-party integration. It arrived roughly on schedule.
 
-The vision is straightforward. A CI build fails. Claude Code reads the failure logs, identifies the problem, implements a fix, and pushes a commit -- all without human intervention. The build goes green. The developer never sees the failure.
+`/autofix-pr` hands the current branch's pull request to a cloud session that watches it. When CI fails or a reviewer leaves a comment, the session reads the failure or the comment, implements a fix, and pushes it. The same toggle is available from the web interface for any pull request a cloud session created. You go to lunch with a red build and come back to a green one -- and a commit history that shows exactly what was changed and why.
 
-This capability is not available today. The primitives exist -- headless mode, pipe input, push output -- but the end-to-end integration that monitors CI pipelines and triggers remediation automatically is not yet productized. Industry analysis suggests this will arrive in the second or third quarter of 2026, likely as a skill or first-party integration rather than a built-in feature.
+Treat it the way you would treat a capable new teammate with push access. Scope it to branches where an automated push is acceptable, keep branch protection on the default branch, and read the commits. The automation is the last mile; the review is still yours.
 
-In the meantime, the manual version works: copy the CI failure log, pipe it to Claude Code, review the fix, push it. The automation is the last mile.
+## Review on Every Pull Request
+
+Review moved from pattern to product along three tiers, and it helps to know which one you are reaching for.
+
+**`/code-review` in your session.** The bundled command reviews your branch's changes -- or a PR number, branch, path, or commit range you pass -- for correctness bugs, in a background subagent so it does not fill your conversation. Effort levels trade coverage for confidence: `low` reports only what it is most sure of; higher levels broaden coverage into reuse, simplification, and efficiency. `--fix` applies the findings; `--comment` posts them to the pull request. It runs on any plan and follows your CLAUDE.md. (`/review` is now an alias.)
+
+**Ultrareview in the cloud.** `/code-review ultra` sends the branch to a fleet of bug-hunting agents in a cloud sandbox that find and then *verify* bugs before reporting them, so what lands back in your session has already survived a second look. `claude ultrareview <target>` runs the same thing non-interactively from CI, prints findings to stdout, and exits nonzero on failure; `--json` gives you the raw payload. It needs a Claude account and is not available on third-party model providers.
+
+**The managed Code Review service.** For Team and Enterprise organizations, an administrator connects the repository host, and every pull request gets reviewed automatically -- findings verified, comments posted inline, severity calibrated. A `REVIEW.md` file in the repository holds review-only rules: what to skip, what to escalate, what to always check. Anyone can request a re-review with `@claude review`, or pause it with `@claude review stop`. Review levels and spend caps are set per organization or per repository.
+
+The rule of thumb: `/code-review` while you work, ultrareview before you merge something risky, the managed service as the baseline for everyone.
+
+## Running on a Schedule
+
+The other first-edition gap was "Claude Code that works while you sleep" without a homegrown cron job. There are now three schedulers, and the choice comes down to where the work runs.
+
+**`/loop` inside a session.** `/loop 5m check whether the deploy finished` re-runs a prompt on an interval while the session stays open. Omit the interval and Claude chooses the delay each time based on what it saw -- short waits while a build is running, longer ones when nothing is happening. Omit the prompt and it runs a built-in maintenance prompt: continue unfinished work, tend the current branch's pull request, then hunt for cleanup. A `loop.md` in the project replaces that default. Loops are session-scoped, expire after seven days, and every iteration re-sends your context -- so for "tell me when this log line appears," the Monitor tool, which streams a background command's output to Claude line by line, is cheaper and faster than polling.
+
+**Scheduled tasks on your desktop.** The desktop app runs a saved prompt on a schedule on your machine, with access to local files and tools, as long as the machine is on.
+
+**Scheduled tasks in the cloud** (formerly "routines"). A saved prompt, one or more repositories, and a set of connectors, run on Anthropic-managed infrastructure -- or your own, via a self-hosted environment -- on a schedule, on an HTTP call to the task's own endpoint, or on repository events such as a new pull request. Create them with `/schedule` from the CLI or from the web. They keep running with your laptop closed, which is the whole point. They are a research preview, and the minimum interval is an hour.
+
+The decision rule: `/loop` for polling while you work, desktop tasks when the job needs your local machine, cloud tasks when it must not depend on it.
 
 ## Long-Running Headless Operation
 
@@ -433,6 +471,8 @@ Most headless usage assumes short-lived sessions: a CI job runs, completes in mi
 One documented case involved Claude Code operating as an autonomous agent for 33 days. The system ran headless with occasional human check-ins, making decisions, executing actions, and maintaining coherent behavior across an extended timeframe. The human operator's role shifted from active direction to periodic supervision -- reviewing outcomes, adjusting parameters, and intervening only when the system drifted from its objectives.
 
 This is not typical usage, and it surfaces challenges that short-lived sessions never encounter. Context compaction happens repeatedly over 33 days. The system must maintain consistent behavior across dozens of compaction cycles. Long-term memory must be externalized -- into files, databases, or structured storage -- because the context window is not a durable store.
+
+Some of the scaffolding that experiment had to build by hand now ships. `/goal` keeps a session working across turns until an evaluator model confirms a stated condition (Chapter 8). An unattended retry mode keeps retrying through capacity errors and waits out usage-limit resets instead of failing the run. And a session interrupted by its host can be resumed with the interrupted turn continued rather than abandoned.
 
 But the existence proof matters. Claude Code is not architecturally limited to short tasks. The `-p` flag, combined with structured persistence and periodic human oversight, supports extended autonomous operation. The constraint is not the tool. It is your ability to define clear objectives, provide adequate context, and build the scaffolding for long-term state management.
 
@@ -443,8 +483,8 @@ The progression from interactive to headless follows a predictable path:
 1. **Start interactive.** Use Claude Code normally. Observe what it does well with your codebase. Identify repetitive tasks.
 2. **Script the repetitive tasks.** Wrap them in headless calls with `-p`. Test the output formats. Get comfortable with the CLI interface.
 3. **Add to build scripts.** Embed headless calls in your project's task runner or build configuration. AI-powered linting, review, and documentation generation become part of your build.
-4. **Move to CI.** Set up devcontainers. Configure permissions. Wire up triggers. Now Claude Code runs on events, not on your command.
-5. **Close the loop.** Connect CI results back to Claude Code. PR comments trigger fixes. Issue labels trigger implementations. The system becomes self-reinforcing.
+4. **Move to CI.** Set up devcontainers. Use `--bare` and an explicit permission mode. Wire up triggers. Now Claude Code runs on events, not on your command.
+5. **Close the loop.** Connect CI results back to Claude Code. PR comments trigger fixes. Failing builds trigger auto-fix. Issue labels trigger implementations. Scheduled tasks run the maintenance nobody remembers to do. The system becomes self-reinforcing.
 
 Each step is independently valuable. You do not need to reach step five to benefit. But each step makes the next one obvious.
 
@@ -452,12 +492,16 @@ Each step is independently valuable. You do not need to reach step five to benef
 
 ## Key Takeaways
 
-- The `-p` flag transforms Claude Code from an interactive tool into a composable Unix utility that reads stdin, writes stdout, and integrates with any pipeline -- `cat error.log | claude -p 'explain' > output.txt` is a complete diagnostic workflow.
-- Four system prompt flags (`--system-prompt`, `--system-prompt-file`, `--append-system-prompt`, `--append-system-prompt-file`) provide a spectrum from inline overrides to version-controlled additive prompts -- prefer file-based variants for CI.
-- The fan-out pattern with `--allowedTools` enables safe batch processing: loop through files, scope permissions per invocation, and aggregate JSON results.
-- Async hooks run tests in the background after every write; `TaskCompleted` hooks block task completion until tests pass; agent-based `Stop` hooks spawn subagents to verify quality before Claude finishes.
+- The `-p` flag transforms Claude Code from an interactive tool into a composable Unix utility -- now framed as the Agent SDK via the CLI -- that reads stdin, writes stdout, and integrates with any pipeline.
+- Use `--bare` for scripts so runs ignore whatever hooks, plugins, and MCP servers happen to be on the machine; it is slated to become the default.
+- `-p` runs now start in Manual mode, denying anything that needs approval. Choose a baseline with `--permission-mode` (`dontAsk` for strict allowlists, `auto` for classifier review) and add `--permission-prompts none` when nobody can answer.
+- `--json-schema`, `--max-budget-usd`, and `--max-turns` make headless runs structured and bounded.
+- Four system prompt flags (`--system-prompt`, `--system-prompt-file`, `--append-system-prompt`, `--append-system-prompt-file`) work in every mode; prefer file-based variants for CI, and use the dynamic boundary marker to keep the static part cached.
+- The fan-out pattern with scoped tools enables safe batch processing; `/batch` and dynamic workflows are the built-in alternatives.
+- Async hooks run tests in the background after every write; `TaskCompleted` hooks block task completion until tests pass (exit 2, reason on stderr); agent-based `Stop` hooks verify quality before Claude finishes.
 - Pre-commit hooks (type check, lint, test) create automated backpressure that makes Claude self-correct at the commit boundary -- you stop being the quality bottleneck.
-- Devcontainers with network isolation and `--dangerously-skip-permissions` are the standard pattern for safe unattended execution in CI.
-- The `--from-pr` flag resumes sessions linked to a specific pull request, preserving full conversation context across review cycles.
-- CI auto-fix -- automatic remediation of build failures -- is the most anticipated missing capability, expected in mid-2026.
+- Devcontainers with network isolation and `--dangerously-skip-permissions` remain the standard pattern for fully unattended execution in CI.
+- CI auto-fix arrived: `/autofix-pr` hands a pull request to a cloud session that pushes fixes for failing checks and review comments.
+- Review comes in three tiers: `/code-review` in-session, ultrareview in the cloud (`claude ultrareview` for CI), and the managed Code Review service on every pull request.
+- Schedule work with `/loop` inside a session, desktop scheduled tasks on your machine, or cloud scheduled tasks that run with your laptop closed.
 - Start with interactive usage, identify repetitive patterns, and progressively move them to headless execution.
